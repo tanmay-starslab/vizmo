@@ -25,7 +25,21 @@ from .field_ops import (
 )
 
 
-def run_wgpu_app(snapshot_path, width=1920, height=1080, fov=90.0, fullscreen=False, screenshot=None, no_stars=False):
+def run_wgpu_app(
+    snapshot_path,
+    width=1920,
+    height=1080,
+    fov=90.0,
+    fullscreen=False,
+    screenshot=None,
+    no_stars=False,
+    types=None,
+    center=None,
+    center_on=None,
+    radius=None,
+    colormap=None,
+    screenshot_dir=None,
+):
     """Run the vizmo application with the wgpu backend.
 
     If `screenshot` is set to a path, the canvas loop runs just long
@@ -35,6 +49,8 @@ def run_wgpu_app(snapshot_path, width=1920, height=1080, fov=90.0, fullscreen=Fa
     import os
 
     snapshot_path = os.path.abspath(snapshot_path)
+    if screenshot_dir:
+        os.makedirs(screenshot_dir, exist_ok=True)
 
     # Initialize GLFW without OpenGL (wgpu uses Vulkan/Metal)
     if not glfw.init():
@@ -96,13 +112,29 @@ def run_wgpu_app(snapshot_path, width=1920, height=1080, fov=90.0, fullscreen=Fa
         except Exception:
             pass
 
-    data = SnapshotData(snapshot_path, hsml_progress=_hsml_progress)
+    data = SnapshotData(snapshot_path, particle_types=types, hsml_progress=_hsml_progress)
     print(f"  {data.n_particles:,} particles loaded (types {data.particle_types})")
 
     # Camera
     camera = Camera(fov=fov, aspect=width / height)
     boxsize = data.header.get("BoxSize", None)
     camera.auto_scale(data.positions, masses=data.get_field("Masses"), boxsize=boxsize)
+    if center is not None or center_on is not None:
+        from .framing import find_center, frame_camera
+
+        view_center = (
+            np.asarray(center, dtype=np.float64)
+            if center is not None
+            else find_center(data, center_on)
+        )
+        used_r = frame_camera(camera, view_center, data.positions, radius=radius)
+        # Re-derive flight speed from the framed radius so a tight zoom
+        # onto one halo doesn't inherit box-scale movement speed.
+        camera.speed = used_r / 5.0
+        print(
+            f"  View centered on ({view_center[0]:.1f}, {view_center[1]:.1f}, "
+            f"{view_center[2]:.1f})  r={used_r:.1f}"
+        )
 
     # Renderer
     renderer = WGPURenderer(device, canvas_context, present_format)
@@ -120,7 +152,13 @@ def run_wgpu_app(snapshot_path, width=1920, height=1080, fov=90.0, fullscreen=Fa
         renderer.star_world_radius = 1.0
 
     # Colormap
-    rgba = colormap_to_texture_data("magma")
+    start_cmap = colormap if colormap in AVAILABLE_COLORMAPS else (colormap or "magma")
+    try:
+        rgba = colormap_to_texture_data(start_cmap)
+    except Exception:
+        print(f"  Unknown colormap {start_cmap!r}; using magma")
+        start_cmap = "magma"
+        rgba = colormap_to_texture_data(start_cmap)
     renderer.set_colormap(rgba)
     # Sink-marker colormap. Independent default; user picks the active
     # colour field from the sink panel (default "None" → black fill).
@@ -164,7 +202,7 @@ def run_wgpu_app(snapshot_path, width=1920, height=1080, fov=90.0, fullscreen=Fa
     _timings = {"cull": 0, "upload": 0, "render": 0}
     _last_message = ""
     _render_mode = RenderMode.surface_density("Masses")
-    _cmap_idx = 0
+    _cmap_idx = AVAILABLE_COLORMAPS.index(start_cmap) if start_cmap in AVAILABLE_COLORMAPS else 0
     _s = make_default_app_state(data)
     _sd_fields = _s["sd_fields"]
     _vector_fields = _s["vector_fields"]
@@ -699,6 +737,8 @@ def run_wgpu_app(snapshot_path, width=1920, height=1080, fov=90.0, fullscreen=Fa
 
         if path is None:
             path = f"vizmo_{int(time.time())}.png"
+            if screenshot_dir:
+                path = os.path.join(screenshot_dir, path)
         fb_w_, fb_h_ = glfw.get_framebuffer_size(window)
         if _state["_composite"]:
             s0 = _state["_slot"][0]
