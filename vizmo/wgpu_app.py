@@ -740,7 +740,19 @@ def run_wgpu_app(snapshot_path, width=1920, height=1080, fov=90.0, fullscreen=Fa
         if pending_types is not None:
             _state["_pending_ptype_reload"] = None
             print(f"Reloading particle types: {pending_types}")
-            data.set_particle_types(pending_types)
+            prev_types = list(data.particle_types)
+            try:
+                data.set_particle_types(pending_types)
+            except Exception as e:
+                # A type with missing/unreadable fields must not kill the
+                # session — restore the previous selection and surface the
+                # error in the HUD instead.
+                _last_message = f"Type load failed: {e}"
+                print(f"  {_last_message}")
+                try:
+                    data.set_particle_types(prev_types)
+                except Exception:
+                    data.set_particle_types([])
 
             # Refresh available scalar/vector field lists (intersection
             # across selected types).

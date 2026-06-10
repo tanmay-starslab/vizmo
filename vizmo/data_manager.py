@@ -1297,7 +1297,15 @@ class SnapshotData:
         return self._read_field("PartType5", name).astype(np.float32)
 
     def set_particle_types(self, particle_types):
-        """(Re)load the particle pool from the given list of PartType ints."""
+        """(Re)load the particle pool from the given list of PartType ints.
+
+        Raises if any requested type can't be loaded; in that case the
+        previous selection (and the positions/masses/hsml arrays) are
+        left untouched so the caller can keep rendering.
+        """
+        prev_selection = list(getattr(self, "particle_types", []))
+        # Set early so _evict_for protects every requested type while the
+        # pool is being assembled.
         self.particle_types = [int(p) for p in particle_types if int(p) in self.available_types]
 
         # The per-ptype field cache (`_cache`) and computed-hsml cache
@@ -1322,22 +1330,27 @@ class SnapshotData:
         hsml_chunks = []
         slices = {}
         offset = 0
-        for p in self.particle_types:
-            # Make room before pulling this ptype off disk if it's not
-            # already cached. Selected ptypes (including this one) are
-            # protected from eviction.
-            self._evict_for(p)
-            ptype = f"PartType{p}"
-            pos = self._read_field(ptype, "Coordinates")
-            mass = self._read_field(ptype, "Masses")
-            hsml = self._resolve_hsml(ptype, pos)
-            self._touch_ptype(p)
-            n = len(mass)
-            pos_chunks.append(pos)
-            mass_chunks.append(mass)
-            hsml_chunks.append(hsml)
-            slices[p] = slice(offset, offset + n)
-            offset += n
+        try:
+            for p in self.particle_types:
+                # Make room before pulling this ptype off disk if it's not
+                # already cached. Selected ptypes (including this one) are
+                # protected from eviction.
+                self._evict_for(p)
+                ptype = f"PartType{p}"
+                pos = self._read_field(ptype, "Coordinates")
+                mass = self._read_field(ptype, "Masses")
+                hsml = self._resolve_hsml(ptype, pos)
+                self._touch_ptype(p)
+                n = len(mass)
+                pos_chunks.append(pos)
+                mass_chunks.append(mass)
+                hsml_chunks.append(hsml)
+                slices[p] = slice(offset, offset + n)
+                offset += n
+        except Exception:
+            # Leave the previous pool intact so the viewer keeps running.
+            self.particle_types = prev_selection
+            raise
 
         self.positions = (
             np.concatenate(pos_chunks, axis=0)
