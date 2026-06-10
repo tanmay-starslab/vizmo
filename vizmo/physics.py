@@ -227,6 +227,165 @@ def _stellar_age(get, units, fields):
     return age.astype(np.float32)
 
 
+GRAV_CGS = 6.6743e-8
+THOMSON_CGS = 6.6524587e-25
+KEV_IN_K = 1.16045e7
+
+# Asplund et al. (2009) solar mass fractions for abundance ratios.
+SOLAR_MASS_FRAC = {"H": 0.7381, "O": 5.74e-3, "Mg": 7.14e-4, "Fe": 1.30e-3}
+# TNG/GFM_Metals column order: H He C N O Ne Mg Si Fe other
+GFM_COLS = {"H": 0, "O": 4, "Mg": 6, "Fe": 8}
+
+
+def cooling_function_tn01(t_kelvin, z_zsun):
+    """Tozzi & Norman (2001) analytic fit to the Sutherland & Dopita
+    cooling function, with the line-cooling term scaled linearly in
+    metallicity about the Z = 0.3 Zsun fit. Returns Lambda in
+    erg cm^3 / s. Approximate — intended as a diagnostic, not for
+    precision cooling physics."""
+    t_kev = np.clip(np.asarray(t_kelvin, dtype=np.float64) / KEV_IN_K,
+                    1e-4, None)
+    zfac = np.clip(np.asarray(z_zsun, dtype=np.float64) / 0.3, 0.0, None)
+    lam22 = (8.6e-3 * t_kev**-1.7 * zfac
+             + 5.8e-2 * np.sqrt(t_kev)
+             + 6.3e-2 * np.sqrt(np.clip(zfac, 1e-10, None)))
+    return lam22 * 1e-22
+
+
+def _rho_u_cgs(get, units):
+    rho = get("Density").astype(np.float64) * units.density_to_cgs
+    u = get("InternalEnergy").astype(np.float64) * units.u_to_cgs
+    return rho, u
+
+
+def _cooling_time(get, units, fields):
+    """t_cool = (3/2) n_tot k T / (n_e n_H Lambda(T, Z)) in Gyr."""
+    t = _temperature(get, units, fields).astype(np.float64)
+    nh = _number_density(get, units, fields).astype(np.float64)
+    if "GFM_Metallicity" in fields:
+        z = np.asarray(get("GFM_Metallicity"), dtype=np.float64) / ZSUN
+    elif "Metallicity[0]" in fields:
+        z = np.asarray(get("Metallicity[0]"), dtype=np.float64) / ZSUN
+    else:
+        z = np.full_like(t, 0.3)
+    lam = cooling_function_tn01(t, z)
+    n_e = 1.2 * nh  # fully ionized H + He
+    n_tot = 2.3 * nh
+    with np.errstate(divide="ignore", invalid="ignore"):
+        tc = 1.5 * n_tot * BOLTZMANN_CGS * t / (n_e * nh * lam)
+    return (tc / SEC_PER_GYR).astype(np.float32)
+
+
+def _free_fall_time(get, units, fields):
+    rho, _ = _rho_u_cgs(get, units)
+    tff = np.sqrt(3.0 * np.pi / (32.0 * GRAV_CGS * np.maximum(rho, 1e-40)))
+    return (tff / SEC_PER_GYR).astype(np.float32)
+
+
+def _tcool_over_tff(get, units, fields):
+    tc = _cooling_time(get, units, fields).astype(np.float64)
+    tff = _free_fall_time(get, units, fields).astype(np.float64)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        return (tc / np.maximum(tff, 1e-30)).astype(np.float32)
+
+
+def _mach_number(get, units, fields):
+    v = _velocity_magnitude(get, units, fields).astype(np.float64)
+    cs = _sound_speed(get, units, fields).astype(np.float64)
+    return (v / np.maximum(cs, 1e-30)).astype(np.float32)
+
+
+def _alfven_speed(get, units, fields):
+    """v_A = |B| / sqrt(4 pi rho) in km/s."""
+    b = (get("@vec:MagneticField").astype(np.float64)
+         * units.bfield_to_gauss)
+    bmag = np.linalg.norm(b, axis=1)
+    rho, _ = _rho_u_cgs(get, units)
+    va = bmag / np.sqrt(4.0 * np.pi * np.maximum(rho, 1e-40))
+    return (va / KM_CGS).astype(np.float32)
+
+
+def _alfven_mach(get, units, fields):
+    v = _velocity_magnitude(get, units, fields).astype(np.float64)
+    va = _alfven_speed(get, units, fields).astype(np.float64)
+    return (v / np.maximum(va, 1e-30)).astype(np.float32)
+
+
+def _plasma_beta(get, units, fields):
+    """beta = P_thermal / P_magnetic = 8 pi (gamma-1) rho u / |B|^2."""
+    rho, u = _rho_u_cgs(get, units)
+    b = (get("@vec:MagneticField").astype(np.float64)
+         * units.bfield_to_gauss)
+    b2 = (b * b).sum(axis=1)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        beta = 8.0 * np.pi * (GAMMA - 1.0) * rho * u / np.maximum(b2, 1e-60)
+    return beta.astype(np.float32)
+
+
+def _jeans_length(get, units, fields):
+    """L_J = sqrt(pi c_s^2 / (G rho)) in kpc."""
+    rho, u = _rho_u_cgs(get, units)
+    cs2 = GAMMA * (GAMMA - 1.0) * u
+    lj = np.sqrt(np.pi * cs2 / (GRAV_CGS * np.maximum(rho, 1e-40)))
+    return (lj / KPC_CGS).astype(np.float32)
+
+
+def _jeans_mass(get, units, fields):
+    """M_J = (4 pi / 3) rho (L_J / 2)^3 in Msun."""
+    rho, u = _rho_u_cgs(get, units)
+    cs2 = GAMMA * (GAMMA - 1.0) * u
+    lj = np.sqrt(np.pi * cs2 / (GRAV_CGS * np.maximum(rho, 1e-40)))
+    mj = 4.0 / 3.0 * np.pi * rho * (lj / 2.0) ** 3
+    return (mj / MSUN_CGS).astype(np.float32)
+
+
+def _specific_j(get, units, fields):
+    """|r x v| about the view center, in kpc km/s (physical)."""
+    pos = get("@vec:Coordinates").astype(np.float64)
+    v = get("@vec:Velocities").astype(np.float64) * units.velocity_to_kms
+    center = get("@center")
+    r = (pos - center[None, :]) * units.length_to_kpc
+    j = np.cross(r, v)
+    return np.linalg.norm(j, axis=1).astype(np.float32)
+
+
+def _angular_momentum_z(get, units, fields):
+    pos = get("@vec:Coordinates").astype(np.float64)
+    v = get("@vec:Velocities").astype(np.float64) * units.velocity_to_kms
+    center = get("@center")
+    r = (pos - center[None, :]) * units.length_to_kpc
+    return (r[:, 0] * v[:, 1] - r[:, 1] * v[:, 0]).astype(np.float32)
+
+
+def _hi_density(get, units, fields):
+    nh = _number_density(get, units, fields).astype(np.float64)
+    xneut = np.clip(np.asarray(get("NeutralHydrogenAbundance"),
+                               dtype=np.float64), 0.0, 1.0)
+    return (nh * xneut).astype(np.float32)
+
+
+def _make_abundance(elem):
+    """[X/H] = log10((m_X/m_H) / (m_X/m_H)_sun) from GFM_Metals."""
+    col = GFM_COLS[elem]
+    sun = SOLAR_MASS_FRAC[elem] / SOLAR_MASS_FRAC["H"]
+
+    def fn(get, units, fields):
+        x = np.asarray(get(f"GFM_Metals[{col}]"), dtype=np.float64)
+        xh = np.asarray(get("GFM_Metals[0]"), dtype=np.float64)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            ratio = x / np.maximum(xh, 1e-12) / sun
+            out = np.log10(np.clip(ratio, 1e-10, None))
+        return out.astype(np.float32)
+
+    return fn
+
+
+def _alpha_enhancement(get, units, fields):
+    o = _make_abundance("O")(get, units, fields).astype(np.float64)
+    fe = _make_abundance("Fe")(get, units, fields).astype(np.float64)
+    return (o - fe).astype(np.float32)
+
+
 class DerivedField:
     def __init__(self, fn, requires, unit, description, any_of=None):
         self.fn = fn
@@ -282,6 +441,55 @@ DERIVED_FIELDS = {
     "StellarAge": DerivedField(
         _stellar_age, {"GFM_StellarFormationTime"}, "Gyr",
         "Stellar age (flat LCDM lookback)"),
+    "CoolingTime": DerivedField(
+        _cooling_time, {"Density", "InternalEnergy"}, "Gyr",
+        "t_cool from Tozzi & Norman (2001) Lambda(T,Z) (approximate)"),
+    "FreeFallTime": DerivedField(
+        _free_fall_time, {"Density"}, "Gyr",
+        "t_ff = sqrt(3 pi / (32 G rho))"),
+    "TcoolOverTff": DerivedField(
+        _tcool_over_tff, {"Density", "InternalEnergy"}, "",
+        "t_cool / t_ff — CGM precipitation diagnostic"),
+    "MachNumber": DerivedField(
+        _mach_number, {"InternalEnergy", "@vec:Velocities"}, "",
+        "|v| / c_s"),
+    "AlfvenSpeed": DerivedField(
+        _alfven_speed, {"Density", "@vec:MagneticField"}, "km/s",
+        "v_A = |B| / sqrt(4 pi rho)"),
+    "AlfvenMach": DerivedField(
+        _alfven_mach, {"Density", "@vec:MagneticField", "@vec:Velocities"},
+        "", "|v| / v_A"),
+    "PlasmaBeta": DerivedField(
+        _plasma_beta, {"Density", "InternalEnergy", "@vec:MagneticField"},
+        "", "P_thermal / P_magnetic"),
+    "JeansLength": DerivedField(
+        _jeans_length, {"Density", "InternalEnergy"}, "kpc",
+        "L_J = sqrt(pi c_s^2 / (G rho))"),
+    "JeansMass": DerivedField(
+        _jeans_mass, {"Density", "InternalEnergy"}, "Msun",
+        "M_J = (4 pi/3) rho (L_J/2)^3"),
+    "SpecificAngularMomentum": DerivedField(
+        _specific_j, {"@vec:Velocities", "@center"}, "kpc km/s",
+        "|r x v| about the view center"),
+    "AngularMomentumZ": DerivedField(
+        _angular_momentum_z, {"@vec:Velocities", "@center"}, "kpc km/s",
+        "z-component of r x v (disk diagnostic)"),
+    "HIDensity": DerivedField(
+        _hi_density, {"Density", "NeutralHydrogenAbundance"}, "cm^-3",
+        "Neutral hydrogen number density n_HI"),
+    "OxygenAbundance": DerivedField(
+        _make_abundance("O"), {"GFM_Metals[4]", "GFM_Metals[0]"}, "dex",
+        "[O/H] (Asplund 2009 solar)"),
+    "MagnesiumAbundance": DerivedField(
+        _make_abundance("Mg"), {"GFM_Metals[6]", "GFM_Metals[0]"}, "dex",
+        "[Mg/H] (Asplund 2009 solar)"),
+    "IronAbundance": DerivedField(
+        _make_abundance("Fe"), {"GFM_Metals[8]", "GFM_Metals[0]"}, "dex",
+        "[Fe/H] (Asplund 2009 solar)"),
+    "AlphaEnhancement": DerivedField(
+        _alpha_enhancement,
+        {"GFM_Metals[4]", "GFM_Metals[8]", "GFM_Metals[0]"}, "dex",
+        "[O/Fe] alpha enhancement"),
 }
 
 # Display units for raw fields after UnitSystem conversion (used by the
