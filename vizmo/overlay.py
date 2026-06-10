@@ -147,6 +147,9 @@ class Panel:
         self._minimized = False
         self._fb_width = 1
         self._fb_height = 1
+        # Pixel nudge applied after anchoring (dx right, dy down) so two
+        # panels can share an anchor without overlapping.
+        self.anchor_offset = (0, 0)
         self._panel_x = 0
         self._panel_y = 0
         self._panel_w = 0
@@ -462,21 +465,34 @@ class Panel:
         self._panel_h = th
         data = img.tobytes()
 
-        fb_w, fb_h = self._fb_width, self._fb_height
-        if s.position == "top-right":
-            self._panel_x = fb_w - tw - 10
-            self._panel_y = 10
-        elif s.position == "top-left":
-            self._panel_x = 10
-            self._panel_y = 10
-        elif s.position == "center":
-            self._panel_x = (fb_w - tw) // 2
-            self._panel_y = (fb_h - th) // 2
-        else:
-            self._panel_x = 10
-            self._panel_y = fb_h - th - 10
+        self._panel_x, self._panel_y = self._panel_origin(tw, th)
 
         self._upload_panel(tw, th, data)
+
+    def _panel_origin(self, tw, th):
+        """Top-left pixel of the panel for the style's anchor position."""
+        fb_w, fb_h = self._fb_width, self._fb_height
+        pos = self.style.position
+        if pos == "top-right":
+            x, y = fb_w - tw - 10, 10
+        elif pos == "top-left":
+            x, y = 10, 10
+        elif pos == "top-center":
+            x, y = (fb_w - tw) // 2, 10
+        elif pos == "center":
+            x, y = (fb_w - tw) // 2, (fb_h - th) // 2
+        elif pos == "center-right":
+            x, y = fb_w - tw - 10, (fb_h - th) // 2
+        elif pos == "center-left":
+            x, y = 10, (fb_h - th) // 2
+        elif pos == "bottom-right":
+            x, y = fb_w - tw - 10, fb_h - th - 10
+        elif pos == "bottom-center":
+            x, y = (fb_w - tw) // 2, fb_h - th - 10
+        else:  # bottom-left
+            x, y = 10, fb_h - th - 10
+        ox, oy = self.anchor_offset
+        return x + int(ox), y + int(oy)
 
     def _upload_panel(self, tw, th, data):
         """Upload PIL image to GPU and build vertex data.

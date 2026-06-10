@@ -215,7 +215,13 @@ def run_wgpu_app(
         WGPUUserMenu,
         WGPUHelpOverlay,
         WGPUToolbar,
+        WGPUScaleBar,
+        WGPUStatusBar,
+        WGPUToastOverlay,
+        WGPUAxesGizmo,
+        WGPUAnalysisDrawer,
     )
+    from .physics import UnitSystem
 
     overlay = WGPUDevOverlay(device, present_format)
     sink_panel = WGPUSinkOverlay(device, present_format)
@@ -223,6 +229,16 @@ def run_wgpu_app(
     user_menu = WGPUUserMenu(device, present_format)
     help_panel = WGPUHelpOverlay(device, present_format)
     toolbar = WGPUToolbar(device, present_format)
+    scale_bar = WGPUScaleBar(device, present_format)
+    status_bar = WGPUStatusBar(device, present_format)
+    toasts = WGPUToastOverlay(device, present_format)
+    gizmo = WGPUAxesGizmo(device, present_format)
+    drawer = WGPUAnalysisDrawer(device, present_format)
+    units = UnitSystem(data.header)
+    # Deferred Shift+click pick: the KD-tree build can take seconds on
+    # a 10M+ particle pool, so the click only queues the ray and shows
+    # a toast; the main loop runs the pick one frame later.
+    _pending_pick = {"ray": None, "frames": 0}
     _timings = {"cull": 0, "upload": 0, "render": 0}
     _last_message = ""
     _render_mode = RenderMode.surface_density("Masses")
@@ -315,10 +331,13 @@ def run_wgpu_app(
             dirty = True
         if action == glfw.PRESS:
             if key == glfw.KEY_ESCAPE:
-                # Esc closes the help panel first; quits only when no
-                # panel is in the way.
+                # Esc closes the help panel / drawer first; quits only
+                # when no panel is in the way.
                 if help_panel.enabled:
                     help_panel.enabled = False
+                elif drawer.enabled:
+                    drawer.enabled = False
+                    drawer.mode = None
                 else:
                     glfw.set_window_should_close(win, True)
             elif key == glfw.KEY_R:
@@ -380,6 +399,21 @@ def run_wgpu_app(
                 print(f"FOV: {camera.adjust_fov(+5.0):.0f}°")
             elif key == glfw.KEY_V:
                 _toggle_recording()
+            elif key == glfw.KEY_G:
+                drawer.toggle("phase")
+            elif key == glfw.KEY_J:
+                drawer.toggle("profile")
+            elif key == glfw.KEY_U:
+                drawer.refresh()
+                drawer.toggle("stats")
+            elif key == glfw.KEY_I:
+                drawer.toggle("inspector")
+            elif key == glfw.KEY_F9:
+                vis = not scale_bar.enabled
+                scale_bar.enabled = vis
+                status_bar.enabled = vis
+                gizmo.enabled = vis
+                toasts.show(f"Science chrome {'on' if vis else 'off'}")
             elif glfw.KEY_1 <= key <= glfw.KEY_9:
                 slot = str(key - glfw.KEY_0)
                 from .session import camera_pose, apply_camera_pose, save_bookmarks
@@ -388,11 +422,13 @@ def run_wgpu_app(
                     _bookmarks[slot] = camera_pose(camera)
                     save_bookmarks(snapshot_path, _bookmarks)
                     print(f"Bookmark {slot} saved")
+                    toasts.show(f"Bookmark {slot} saved", "ok")
                 elif slot in _bookmarks:
                     apply_camera_pose(camera, _bookmarks[slot])
                     print(f"Bookmark {slot} restored")
+                    toasts.show(f"Bookmark {slot}")
                 else:
-                    print(f"Bookmark {slot} is empty (Shift+{slot} to save)")
+                    toasts.show(f"Bookmark {slot} empty (Shift+{slot} saves)", "warn")
         # [ and ] repeat while held for a smooth zoom.
         if action == glfw.REPEAT:
             if key == glfw.KEY_LEFT_BRACKET:
@@ -565,6 +601,37 @@ def run_wgpu_app(
             x, y = _cursor_to_fb(win)
             if help_panel.enabled and help_panel.on_click(x, y):
                 return
+            shift_held = (
+                glfw.get_key(win, glfw.KEY_LEFT_SHIFT) == glfw.PRESS
+                or glfw.get_key(win, glfw.KEY_RIGHT_SHIFT) == glfw.PRESS
+            )
+            if shift_held:
+                # Shift+click: pick the particle under the cursor. The
+                # actual KD-tree query runs from the main loop a frame
+                # later so the "building index" toast can present first.
+                fw, fh = glfw.get_framebuffer_size(win)
+                nx = 2.0 * x / max(fw, 1) - 1.0
+                ny = 1.0 - 2.0 * y / max(fh, 1)
+                tan_half = np.tan(np.radians(camera.fov) / 2.0)
+                ray = (
+                    camera.forward
+                    + nx * tan_half * camera.aspect * camera.right
+                    + ny * tan_half * camera.up
+                )
+                _pending_pick["ray"] = ray / np.linalg.norm(ray)
+                _pending_pick["frames"] = 2
+                if getattr(data, "_pick_tree", None) is None:
+                    toasts.show("Building spatial index...", "info")
+                return
+            dr_action = drawer.on_click(x, y)
+            if dr_action:
+                if dr_action == "center_on_pick" and drawer._picked_index is not None:
+                    new_c = data.positions[drawer._picked_index].copy()
+                    data.set_view_center(new_c)
+                    scale_bar._last_key = None
+                    app_proxy._apply_render_mode(auto_range=False)
+                    toasts.show("View center moved to picked particle", "ok")
+                return
             tb_action = toolbar.on_click(x, y)
             if tb_action:
                 if tb_action == "auto_range":
@@ -645,10 +712,12 @@ def run_wgpu_app(
             os.makedirs(_recording["dir"], exist_ok=True)
             _recording["frame"] = 0
             print(f"Recording frames to {_recording['dir']}/")
+            toasts.show("Recording started", "ok")
         else:
             d, n = _recording["dir"], _recording["frame"]
             _recording["dir"] = None
             print(f"Recording stopped: {n} frames in {d}/")
+            toasts.show(f"Recording stopped: {n} frames", "ok")
             print(f"  Make a movie with e.g.: ffmpeg -framerate 30 -i {d}/frame_%05d.png -pix_fmt yuv420p out.mp4")
 
     # Main loop state
@@ -859,6 +928,8 @@ def run_wgpu_app(
             renderer.screenshot(path, fb_w_, fb_h_, camera, composite_args=comp, quiet=quiet)
         else:
             renderer.screenshot(path, fb_w_, fb_h_, camera, quiet=quiet)
+        if not quiet:
+            toasts.show(f"Screenshot saved: {os.path.basename(path)}", "ok")
         return os.path.abspath(path)
 
     print("vizmo [wgpu] running. WASD=move, mouse=look, F1/H=help, ESC=quit, R=auto-range, P=screenshot.")
@@ -895,6 +966,31 @@ def run_wgpu_app(
 
         glfw.poll_events()
 
+        # Deferred Shift+click pick: runs after the click frame has
+        # presented (so the "building index" toast is visible during
+        # the KD-tree build).
+        if _pending_pick["ray"] is not None:
+            if _pending_pick["frames"] > 0:
+                _pending_pick["frames"] -= 1
+                dirty = True
+            else:
+                ray = _pending_pick["ray"]
+                _pending_pick["ray"] = None
+                from .analysis import pick_particle
+
+                try:
+                    idx = pick_particle(camera.position, ray, data,
+                                        fov_deg=camera.fov)
+                except Exception as e:
+                    idx = None
+                    toasts.show(f"Pick failed: {e}", "error")
+                if idx is None:
+                    toasts.show("No particle under cursor", "warn")
+                else:
+                    drawer.open_inspector(idx)
+                    toasts.show(f"Picked particle {idx:,}", "ok")
+                dirty = True
+
         # Particle-type reload requested from the UI tickboxes.
         pending_types = _state.get("_pending_ptype_reload")
         if pending_types is not None:
@@ -909,6 +1005,7 @@ def run_wgpu_app(
                 # error in the HUD instead.
                 _last_message = f"Type load failed: {e}"
                 print(f"  {_last_message}")
+                toasts.show(_last_message, "error", duration=5.0)
                 try:
                     data.set_particle_types(prev_types)
                 except Exception:
@@ -1159,9 +1256,10 @@ def run_wgpu_app(
             or fb_size_now != prev_fb_size
         )
         # ui_dirty alone is enough to require a frame, but lets us skip
-        # the (very expensive on big snapshots) accum pass.
-        frame_dirty = scene_dirty or ui_dirty
-        skip_accum_this_frame = ui_dirty and not scene_dirty
+        # the (very expensive on big snapshots) accum pass. Active
+        # toasts animate (fade-out), so they hold the UI path open.
+        frame_dirty = scene_dirty or ui_dirty or toasts.active
+        skip_accum_this_frame = (ui_dirty or toasts.active) and not scene_dirty
 
         if not frame_dirty:
             # Require a few consecutive idle frames before we actually
@@ -1305,7 +1403,24 @@ def run_wgpu_app(
                 user_menu.set_framebuffer_size(fb_w, fb_h)
                 help_panel.set_framebuffer_size(fb_w, fb_h)
                 toolbar.set_framebuffer_size(fb_w, fb_h)
+                for p in (scale_bar, status_bar, toasts, gizmo, drawer):
+                    p.set_framebuffer_size(fb_w, fb_h)
                 toolbar.update(recording=_recording["dir"] is not None)
+
+                # Science chrome (each panel dirty-checks internally)
+                view_center = data.get_view_center()
+                scale_bar.update(camera, units.length_to_kpc, view_center)
+                active_field = (
+                    _state["_wa_data_field"]
+                    if _state["_render_mode_name"] in ("WeightedAverage", "WeightedVariance")
+                    else _state["_sd_field"]
+                )
+                status_bar.update(camera, units, view_center, active_field,
+                                  renderer.n_particles, renderer.n_total)
+                gizmo.update(camera)
+                toasts.update()
+                if drawer.enabled:
+                    drawer.update(data)
 
                 smooth_fps_val = smooth_fps_ema if smooth_fps_ema > 0 else fps
                 # Only rebuild overlay texture at ~4Hz to avoid PIL cost every frame
@@ -1365,12 +1480,21 @@ def run_wgpu_app(
                 )
                 user_menu.render_to_pass(rpass)
                 toolbar.render_to_pass(rpass)
+                if scale_bar.enabled:
+                    scale_bar.render_to_pass(rpass)
+                if status_bar.enabled:
+                    status_bar.render_to_pass(rpass)
+                if gizmo.enabled:
+                    gizmo.render_to_pass(rpass)
                 if sink_panel.enabled:
                     sink_panel.render_to_pass(rpass)
                 if overlay.enabled:
                     overlay.render_to_pass(rpass)
+                if drawer.enabled:
+                    drawer.render_to_pass(rpass)
                 if help_panel.enabled:
                     help_panel.render_to_pass(rpass)
+                toasts.render_to_pass(rpass)
                 rpass.end()
             except Exception:
                 import traceback

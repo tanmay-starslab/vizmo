@@ -10,6 +10,13 @@ import wgpu
 from pathlib import Path
 
 from .overlay import DevOverlay, SinkOverlay, UserMenu, HelpOverlay, ToolbarOverlay
+from .science_panels import (
+    ScaleBar,
+    StatusBar,
+    ToastOverlay,
+    AxesGizmo,
+    AnalysisDrawer,
+)
 
 SHADER_DIR = Path(__file__).parent / "shaders"
 
@@ -105,24 +112,19 @@ class _WGPUPanelMixin:
 
     def _upload_panel(self, tw, th, data):
         """Upload the PIL panel image into a wgpu texture and build the
-        textured-quad vertex buffer for this frame's draw call."""
+        textured-quad vertex buffer for this frame's draw call.
+
+        Quad placement derives from the same pixel origin used for
+        hit-testing (Panel._panel_origin), so clicks and pixels can
+        never disagree about where a panel is.
+        """
         self._tex = True  # satisfy dirty-flag check in render_panel
-        fb_w, fb_h = self._fb_width, self._fb_height
-        s = self.style
-        px_w = tw / fb_w * 2
-        px_h = th / fb_h * 2
-        if s.position == "top-right":
-            x1, x2 = 1.0 - px_w - 0.01, 1.0 - 0.01
-            y1, y2 = 1.0 - px_h - 0.01, 1.0 - 0.01
-        elif s.position == "top-left":
-            x1, x2 = -1.0 + 0.01, -1.0 + px_w + 0.01
-            y1, y2 = 1.0 - px_h - 0.01, 1.0 - 0.01
-        elif s.position == "center":
-            x1, x2 = -px_w / 2, px_w / 2
-            y1, y2 = -px_h / 2, px_h / 2
-        else:
-            x1, x2 = -1.0 + 0.01, -1.0 + px_w + 0.01
-            y1, y2 = -1.0 + 0.01, -1.0 + px_h + 0.01
+        fb_w, fb_h = max(self._fb_width, 1), max(self._fb_height, 1)
+        px, py = self._panel_origin(tw, th)
+        x1 = px / fb_w * 2 - 1.0
+        x2 = (px + tw) / fb_w * 2 - 1.0
+        y2 = 1.0 - py / fb_h * 2
+        y1 = 1.0 - (py + th) / fb_h * 2
 
         verts = np.array([
             x1, y1, 0, 1,  x2, y1, 1, 1,  x1, y2, 0, 0,
@@ -164,6 +166,40 @@ class WGPUHelpOverlay(_WGPUPanelMixin, HelpOverlay):
 class WGPUToolbar(_WGPUPanelMixin, ToolbarOverlay):
     def __init__(self, device, present_format):
         ToolbarOverlay.__init__(self)
+        self._init_wgpu(device, present_format)
+
+
+class WGPUScaleBar(_WGPUPanelMixin, ScaleBar):
+    def __init__(self, device, present_format):
+        ScaleBar.__init__(self)
+        self._init_wgpu(device, present_format)
+
+
+class WGPUStatusBar(_WGPUPanelMixin, StatusBar):
+    def __init__(self, device, present_format):
+        StatusBar.__init__(self)
+        self._init_wgpu(device, present_format)
+
+
+class WGPUToastOverlay(_WGPUPanelMixin, ToastOverlay):
+    def __init__(self, device, present_format):
+        ToastOverlay.__init__(self)
+        self._init_wgpu(device, present_format)
+
+    def render_to_pass(self, render_pass):
+        if self._toasts:
+            self._wgpu_backend.render(render_pass)
+
+
+class WGPUAxesGizmo(_WGPUPanelMixin, AxesGizmo):
+    def __init__(self, device, present_format):
+        AxesGizmo.__init__(self)
+        self._init_wgpu(device, present_format)
+
+
+class WGPUAnalysisDrawer(_WGPUPanelMixin, AnalysisDrawer):
+    def __init__(self, device, present_format):
+        AnalysisDrawer.__init__(self)
         self._init_wgpu(device, present_format)
 
 
