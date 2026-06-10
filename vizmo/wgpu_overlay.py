@@ -9,7 +9,7 @@ import numpy as np
 import wgpu
 from pathlib import Path
 
-from .overlay import DevOverlay, SinkOverlay, UserMenu, HelpOverlay
+from .overlay import DevOverlay, SinkOverlay, UserMenu, HelpOverlay, ToolbarOverlay
 
 SHADER_DIR = Path(__file__).parent / "shaders"
 
@@ -114,6 +114,9 @@ class _WGPUPanelMixin:
         if s.position == "top-right":
             x1, x2 = 1.0 - px_w - 0.01, 1.0 - 0.01
             y1, y2 = 1.0 - px_h - 0.01, 1.0 - 0.01
+        elif s.position == "top-left":
+            x1, x2 = -1.0 + 0.01, -1.0 + px_w + 0.01
+            y1, y2 = 1.0 - px_h - 0.01, 1.0 - 0.01
         elif s.position == "center":
             x1, x2 = -px_w / 2, px_w / 2
             y1, y2 = -px_h / 2, px_h / 2
@@ -155,6 +158,12 @@ class WGPUSinkOverlay(_WGPUPanelMixin, SinkOverlay):
 class WGPUHelpOverlay(_WGPUPanelMixin, HelpOverlay):
     def __init__(self, device, present_format):
         HelpOverlay.__init__(self)
+        self._init_wgpu(device, present_format)
+
+
+class WGPUToolbar(_WGPUPanelMixin, ToolbarOverlay):
+    def __init__(self, device, present_format):
+        ToolbarOverlay.__init__(self)
         self._init_wgpu(device, present_format)
 
 

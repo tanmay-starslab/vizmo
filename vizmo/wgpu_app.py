@@ -208,13 +208,20 @@ def run_wgpu_app(
     glfw.set_window_title(window, "vizmo [wgpu] | Initializing...")
 
     # UI overlays
-    from .wgpu_overlay import WGPUDevOverlay, WGPUSinkOverlay, WGPUUserMenu, WGPUHelpOverlay
+    from .wgpu_overlay import (
+        WGPUDevOverlay,
+        WGPUSinkOverlay,
+        WGPUUserMenu,
+        WGPUHelpOverlay,
+        WGPUToolbar,
+    )
 
     overlay = WGPUDevOverlay(device, present_format)
     sink_panel = WGPUSinkOverlay(device, present_format)
     sink_panel.enabled = data.n_stars > 0
     user_menu = WGPUUserMenu(device, present_format)
     help_panel = WGPUHelpOverlay(device, present_format)
+    toolbar = WGPUToolbar(device, present_format)
     _timings = {"cull": 0, "upload": 0, "render": 0}
     _last_message = ""
     _render_mode = RenderMode.surface_density("Masses")
@@ -420,6 +427,8 @@ def run_wgpu_app(
         def __getattr__(self, name):
             if name == "renderer":
                 return renderer
+            if name == "camera":
+                return camera
             if name in _state:
                 return _state[name]
             raise AttributeError(name)
@@ -554,6 +563,21 @@ def run_wgpu_app(
         if button == glfw.MOUSE_BUTTON_LEFT and action == glfw.PRESS:
             x, y = _cursor_to_fb(win)
             if help_panel.enabled and help_panel.on_click(x, y):
+                return
+            tb_action = toolbar.on_click(x, y)
+            if tb_action:
+                if tb_action == "auto_range":
+                    if _state["_composite"]:
+                        _auto_range_composite_slot(0, "Lightness")
+                        _auto_range_composite_slot(1, "Color")
+                    else:
+                        _state["_needs_auto_range"] = True
+                elif tb_action == "screenshot":
+                    _take_screenshot()
+                elif tb_action == "record":
+                    _toggle_recording()
+                elif tb_action == "help":
+                    help_panel.enabled = not help_panel.enabled
                 return
             if user_menu.on_click(x, y, app_proxy):
                 return
@@ -1279,6 +1303,8 @@ def run_wgpu_app(
                 sink_panel.set_framebuffer_size(fb_w, fb_h)
                 user_menu.set_framebuffer_size(fb_w, fb_h)
                 help_panel.set_framebuffer_size(fb_w, fb_h)
+                toolbar.set_framebuffer_size(fb_w, fb_h)
+                toolbar.update(recording=_recording["dir"] is not None)
 
                 smooth_fps_val = smooth_fps_ema if smooth_fps_ema > 0 else fps
                 # Only rebuild overlay texture at ~4Hz to avoid PIL cost every frame
@@ -1323,6 +1349,8 @@ def run_wgpu_app(
                     available_ptypes=data.available_types,
                     selected_ptypes=list(data.particle_types),
                     ptype_labels=data.ptype_labels,
+                    fov=camera.fov,
+                    cam_speed=camera.speed,
                 )
 
                 rpass = _frame_encoder.begin_render_pass(
@@ -1335,6 +1363,7 @@ def run_wgpu_app(
                     ]
                 )
                 user_menu.render_to_pass(rpass)
+                toolbar.render_to_pass(rpass)
                 if sink_panel.enabled:
                     sink_panel.render_to_pass(rpass)
                 if overlay.enabled:

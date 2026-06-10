@@ -7,10 +7,10 @@ from PIL import Image, ImageDraw, ImageFont
 from dataclasses import dataclass
 
 
-def _get_font(size):
+def _get_font(size, family="monospace"):
     try:
         import matplotlib.font_manager as fm
-        path = fm.findfont(fm.FontProperties(family="monospace"))
+        path = fm.findfont(fm.FontProperties(family=family))
         if path:
             return ImageFont.truetype(path, size)
     except Exception:
@@ -19,6 +19,15 @@ def _get_font(size):
         return ImageFont.load_default(size=size)
     except TypeError:
         return ImageFont.load_default()
+
+
+def _rounded(draw, box, radius, fill=None, outline=None, width=1):
+    """rounded_rectangle with a guard for degenerate boxes."""
+    (x0, y0), (x1, y1) = box
+    if x1 <= x0 or y1 <= y0:
+        return
+    r = max(0, min(radius, (x1 - x0) // 2, (y1 - y0) // 2))
+    draw.rounded_rectangle([x0, y0, x1, y1], radius=r, fill=fill, outline=outline, width=width)
 
 
 @dataclass
@@ -37,7 +46,9 @@ class PanelStyle:
     slider_btn: tuple
     field_bg: tuple = (30, 30, 30, 255)
     field_active: tuple = (50, 50, 80, 255)
-    position: str = "top-right"  # "top-right" or "bottom-left"
+    position: str = "top-right"  # "top-right", "top-left", "bottom-left", or "center"
+    font_family: str = "monospace"
+    radius: int = 10  # panel corner radius (px at 1080p reference)
 
 
 DEV_STYLE = PanelStyle(
@@ -68,8 +79,8 @@ SINK_STYLE = PanelStyle(
 
 HELP_STYLE = PanelStyle(
     font_size=18, line_height=26, margin=14, min_width=420,
-    bg_color=(12, 14, 22, 235),
-    text_color=(225, 228, 235, 255),
+    bg_color=(14, 16, 26, 238),
+    text_color=(228, 231, 238, 255),
     accent_color=(120, 190, 255, 255),
     toggle_on_color=(120, 190, 255, 255),
     toggle_off_color=(150, 150, 160, 255),
@@ -77,19 +88,38 @@ HELP_STYLE = PanelStyle(
     dropdown_hover=(80, 100, 140, 255),
     slider_btn=(70, 75, 90, 255),
     position="center",
+    font_family="sans-serif",
+    radius=14,
 )
 
 USER_STYLE = PanelStyle(
-    font_size=28, line_height=37, margin=13, min_width=267,
-    bg_color=(15, 15, 25, 100),
-    text_color=(220, 220, 220, 255),
+    font_size=28, line_height=38, margin=14, min_width=280,
+    bg_color=(16, 18, 28, 170),
+    text_color=(228, 231, 238, 255),
     accent_color=(100, 180, 255, 255),
     toggle_on_color=(100, 180, 255, 255),
-    toggle_off_color=(220, 220, 220, 255),
-    dropdown_bg=(30, 30, 30, 255),
+    toggle_off_color=(110, 115, 130, 255),
+    dropdown_bg=(34, 37, 50, 255),
     dropdown_hover=(80, 100, 140, 255),
-    slider_btn=(80, 80, 80, 255),
+    slider_btn=(64, 70, 88, 255),
     position="bottom-left",
+    font_family="sans-serif",
+    radius=14,
+)
+
+TOOLBAR_STYLE = PanelStyle(
+    font_size=22, line_height=34, margin=10, min_width=10,
+    bg_color=(16, 18, 28, 170),
+    text_color=(228, 231, 238, 255),
+    accent_color=(100, 180, 255, 255),
+    toggle_on_color=(100, 180, 255, 255),
+    toggle_off_color=(110, 115, 130, 255),
+    dropdown_bg=(34, 37, 50, 255),
+    dropdown_hover=(80, 100, 140, 255),
+    slider_btn=(64, 70, 88, 255),
+    position="top-left",
+    font_family="sans-serif",
+    radius=12,
 )
 
 
@@ -107,7 +137,7 @@ class Panel:
         self.style = style
         self._base_style = style  # unscaled original
         self._tex = None
-        self._font = _get_font(style.font_size)
+        self._font = _get_font(style.font_size, style.font_family)
         self._dpi_scale = 1.0
         self._widgets = []
         self._dropdown_open = None
@@ -135,7 +165,7 @@ class Panel:
                 font_size=max(8, int(bs.font_size * new_scale)),
                 line_height=max(12, int(bs.line_height * new_scale)),
                 margin=max(4, int(bs.margin * new_scale)),
-                min_width=max(100, int(bs.min_width * new_scale)),
+                min_width=max(10, int(bs.min_width * new_scale)),
                 bg_color=bs.bg_color, text_color=bs.text_color,
                 accent_color=bs.accent_color,
                 toggle_on_color=bs.toggle_on_color,
@@ -146,8 +176,10 @@ class Panel:
                 field_bg=bs.field_bg,
                 field_active=bs.field_active,
                 position=bs.position,
+                font_family=bs.font_family,
+                radius=max(4, int(bs.radius * new_scale)),
             )
-            self._font = _get_font(self.style.font_size)
+            self._font = _get_font(self.style.font_size, self.style.font_family)
             self._last_items_key = None  # force re-render
 
     def render_panel(self, items):
@@ -175,6 +207,7 @@ class Panel:
             if item[0] == "kv":
                 bbox = draw.textbbox((0, 0), item[1], font=self._font)
                 kv_key_w = max(kv_key_w, bbox[2] - bbox[0])
+        toggle_pill_w = int(LH * 1.5)
         for item in items:
             t = item[0]
             if t == "kv":
@@ -187,15 +220,22 @@ class Panel:
             elif t == "button":
                 bbox = draw.textbbox((0, 0), item[1], font=self._font)
                 max_w = max(max_w, bbox[2] - bbox[0] + M * 4 + 16)
+            elif t == "button_row":
+                row_w = M
+                for entry in item[1]:
+                    bbox = draw.textbbox((0, 0), entry[0], font=self._font)
+                    row_w += (bbox[2] - bbox[0]) + 28 + 8
+                max_w = max(max_w, row_w)
             elif t == "toggle":
-                bbox = draw.textbbox((0, 0), f"[ ] {item[1]}", font=self._font)
-                max_w = max(max_w, bbox[2] - bbox[0] + M * 4)
+                bbox = draw.textbbox((0, 0), item[1], font=self._font)
+                max_w = max(max_w, toggle_pill_w + 10 + bbox[2] - bbox[0] + M * 4)
             elif t == "dropdown":
-                bbox = draw.textbbox((0, 0), f"> {item[1]}: {item[2]}", font=self._font)
+                bbox = draw.textbbox((0, 0), f"v {item[1]}: {item[2]}", font=self._font)
                 max_w = max(max_w, bbox[2] - bbox[0] + M * 4)
             elif t == "slider":
-                bbox = draw.textbbox((0, 0), f"[-] {item[1]}: {item[2]:.2f} [+]", font=self._font)
-                max_w = max(max_w, bbox[2] - bbox[0] + M * 4)
+                bbox = draw.textbbox((0, 0), f"{item[1]}: {item[2]:.2f}", font=self._font)
+                # text + both buttons + at least 90px of visible track
+                max_w = max(max_w, bbox[2] - bbox[0] + 2 * (LH + 10) + 90 + M * 4)
             elif t == "ptype_row":
                 # Vertical stack: width is just the widest single label
                 # (plus the indent + padding), not the sum of all of them.
@@ -229,11 +269,14 @@ class Panel:
         tw = max_w + M * 2
         th = (n_lines + dropdown_extra + ptype_extra) * LH + M * 2
 
-        img = Image.new("RGBA", (tw, th), s.bg_color)
+        img = Image.new("RGBA", (tw, th), (0, 0, 0, 0))
         draw = ImageDraw.Draw(img)
+        # Panel chrome: rounded card with a hairline border.
+        _rounded(draw, [(0, 0), (tw - 1, th - 1)], s.radius, fill=s.bg_color,
+                 outline=(255, 255, 255, 30), width=1)
         y = M
         self._widgets = []
-        toggle_indent = int(self._font.getlength("[x] ")) + 5 if hasattr(self._font, 'getlength') else M + 35
+        r_widget = max(4, s.radius // 2)
 
         for item in items:
             t = item[0]
@@ -251,22 +294,46 @@ class Panel:
             elif t == "button":
                 _, label, key = item
                 bbox = draw.textbbox((0, 0), label, font=self._font)
-                bw = bbox[2] - bbox[0] + 16
-                draw.rectangle(
-                    [(M, y + 2), (M + bw, y + LH - 2)],
-                    fill=s.slider_btn,
-                    outline=s.text_color,
-                )
-                draw.text((M + 8, y), label, fill=s.text_color, font=self._font)
+                bw = bbox[2] - bbox[0] + 20
+                _rounded(draw, [(M, y + 2), (M + bw, y + LH - 2)], r_widget,
+                         fill=s.slider_btn, outline=(255, 255, 255, 60))
+                draw.text((M + 10, y), label, fill=s.text_color, font=self._font)
                 self._widgets.append((y, y + LH, "button", key, M, M + bw))
+                y += LH
+
+            elif t == "button_row":
+                # Horizontal row of rounded buttons, each with its own
+                # x hit range. item[1] = [(label, key), ...]; an entry
+                # may carry a third "active" flag for a lit state.
+                x = M
+                for entry in item[1]:
+                    label, bkey = entry[0], entry[1]
+                    active = len(entry) > 2 and entry[2]
+                    bbox = draw.textbbox((0, 0), label, font=self._font)
+                    bw = bbox[2] - bbox[0] + 28
+                    fill = s.accent_color if active else s.slider_btn
+                    txt_col = (15, 18, 28, 255) if active else s.text_color
+                    _rounded(draw, [(x, y + 2), (x + bw, y + LH - 2)], r_widget,
+                             fill=fill, outline=(255, 255, 255, 60))
+                    draw.text((x + 14, y), label, fill=txt_col, font=self._font)
+                    self._widgets.append((y, y + LH, "hbutton", bkey, x, x + bw))
+                    x += bw + 8
                 y += LH
 
             elif t == "toggle":
                 _, label, state, key = item
-                indicator = "[x]" if state else "[ ]"
-                color = s.toggle_on_color if state else s.toggle_off_color
-                draw.text((M, y), indicator, fill=color, font=self._font)
-                draw.text((M + toggle_indent, y), label, fill=s.text_color, font=self._font)
+                # Switch-style pill with a sliding knob.
+                pill_w = int(LH * 1.5)
+                pill_h = LH - 8
+                py0 = y + (LH - pill_h) // 2
+                track = s.toggle_on_color if state else (60, 64, 78, 255)
+                _rounded(draw, [(M, py0), (M + pill_w, py0 + pill_h)],
+                         pill_h // 2, fill=track)
+                kr = pill_h - 4
+                kx = M + pill_w - kr - 2 if state else M + 2
+                draw.ellipse([kx, py0 + 2, kx + kr, py0 + 2 + kr],
+                             fill=(240, 242, 248, 255))
+                draw.text((M + pill_w + 10, y), label, fill=s.text_color, font=self._font)
                 self._widgets.append((y, y + LH, "toggle", key))
                 y += LH
 
@@ -274,8 +341,13 @@ class Panel:
                 _, label, current, options, key = item
                 is_open = self._dropdown_open == key
                 arrow = "v" if is_open else ">"
-                text = f"{arrow} {label}: {current}"
-                draw.text((M, y), text, fill=s.accent_color, font=self._font)
+                row_bg = s.dropdown_hover if is_open else None
+                if row_bg:
+                    _rounded(draw, [(M - 4, y + 1), (tw - M + 4, y + LH - 1)],
+                             r_widget, fill=(255, 255, 255, 18))
+                draw.text((M, y), f"{arrow} {label}: ", fill=s.accent_color, font=self._font)
+                lab_w = draw.textlength(f"{arrow} {label}: ", font=self._font)
+                draw.text((M + lab_w, y), str(current), fill=s.text_color, font=self._font)
                 self._widgets.append((y, y + LH, "dropdown_header", key))
                 y += LH
                 if is_open:
@@ -291,10 +363,14 @@ class Panel:
                         y += LH
                     vis_start = scroll if scrollable else 0
                     vis_end = min(vis_start + max_dd_visible, n_opts)
-                    for opt in options[vis_start:vis_end]:
-                        bg = s.dropdown_hover if opt == current else s.dropdown_bg
-                        draw.rectangle([(M + 10, y), (tw - M, y + LH - 1)], fill=bg)
-                        draw.text((M + 15, y), opt, fill=s.text_color, font=self._font)
+                    for i, opt in enumerate(options[vis_start:vis_end]):
+                        if opt == current:
+                            _rounded(draw, [(M + 10, y), (tw - M, y + LH - 1)],
+                                     r_widget, fill=s.dropdown_hover)
+                        elif i % 2 == 0:
+                            draw.rectangle([(M + 10, y), (tw - M, y + LH - 1)],
+                                           fill=(255, 255, 255, 10))
+                        draw.text((M + 15, y), str(opt), fill=s.text_color, font=self._font)
                         self._widgets.append((y, y + LH, "dropdown_item", key, opt))
                         y += LH
                     if scrollable:
@@ -306,22 +382,41 @@ class Panel:
 
             elif t == "slider":
                 _, label, value, vmin, vmax, key = item
-                btn_w = 25
-                text = f"{label}: {value:.2f}"
-                draw.rectangle([(M, y), (M + btn_w, y + LH - 1)], fill=s.slider_btn)
-                draw.text((M + 5, y), "-", fill=s.text_color, font=self._font)
+                btn_w = LH
+                # - button
+                _rounded(draw, [(M, y + 2), (M + btn_w, y + LH - 2)], r_widget,
+                         fill=s.slider_btn)
+                mw = draw.textlength("-", font=self._font)
+                draw.text((M + (btn_w - mw) / 2, y), "-", fill=s.text_color, font=self._font)
                 self._widgets.append((y, y + LH, "slider_dec", key, vmin, vmax))
-                draw.text((M + btn_w + 5, y), text, fill=s.text_color, font=self._font)
+                # + button
                 rx = tw - M - btn_w
-                draw.rectangle([(rx, y), (tw - M, y + LH - 1)], fill=s.slider_btn)
-                draw.text((rx + 5, y), "+", fill=s.text_color, font=self._font)
+                _rounded(draw, [(rx, y + 2), (tw - M, y + LH - 2)], r_widget,
+                         fill=s.slider_btn)
+                pw = draw.textlength("+", font=self._font)
+                draw.text((rx + (btn_w - pw) / 2, y), "+", fill=s.text_color, font=self._font)
                 self._widgets.append((y, y + LH, "slider_inc", key, vmin, vmax))
+                # Label left of the track, track fills the remaining gap.
+                text = f"{label}: {value:.2f}"
+                tx_text = M + btn_w + 10
+                draw.text((tx_text, y), text, fill=s.text_color, font=self._font)
+                tw_text = draw.textlength(text, font=self._font)
+                tx0, tx1 = int(tx_text + tw_text + 10), rx - 10
+                tcy = y + LH // 2
+                if tx1 - tx0 > 12 and vmax > vmin:
+                    frac = min(1.0, max(0.0, (value - vmin) / (vmax - vmin)))
+                    _rounded(draw, [(tx0, tcy - 3), (tx1, tcy + 3)], 3,
+                             fill=(50, 54, 68, 255))
+                    fx = tx0 + int((tx1 - tx0) * frac)
+                    if fx > tx0:
+                        _rounded(draw, [(tx0, tcy - 3), (fx, tcy + 3)], 3,
+                                 fill=s.accent_color)
                 y += LH
 
             elif t == "ptype_row":
                 _, label, available, selected, key, labels = item
-                # Header line + one toggle button per available ptype,
-                # stacked vertically and indented under the header.
+                # Header line + one chip per available ptype, stacked
+                # vertically and indented under the header.
                 draw.text((M, y), f"{label}:", fill=s.text_color, font=self._font)
                 y += LH
                 indent = M + 16
@@ -329,18 +424,17 @@ class Panel:
                     txt = str(labels.get(p, p))
                     tb = draw.textbbox((0, 0), txt, font=self._font)
                     tw_ = tb[2] - tb[0]
-                    box_w = max(LH - 4, tw_ + 8)
+                    box_w = max(LH - 4, tw_ + 14)
                     on = p in selected
                     fill = s.toggle_on_color if on else s.field_bg
-                    draw.rectangle(
-                        [(indent, y + 2), (indent + box_w, y + LH - 4)],
-                        fill=fill,
-                        outline=s.text_color,
-                    )
+                    txt_col = (15, 18, 28, 255) if on else s.text_color
+                    _rounded(draw, [(indent, y + 2), (indent + box_w, y + LH - 4)],
+                             (LH - 6) // 2, fill=fill,
+                             outline=(255, 255, 255, 60))
                     draw.text(
                         (indent + (box_w - tw_) // 2, y),
                         txt,
-                        fill=s.text_color,
+                        fill=txt_col,
                         font=self._font,
                     )
                     self._widgets.append((y, y + LH, "ptype_tick", key, p, indent, indent + box_w))
@@ -355,7 +449,9 @@ class Panel:
                 draw.text((M, y), label_text, fill=s.text_color, font=self._font)
                 field_x = M + label_w
                 field_bg = s.field_active if active else s.field_bg
-                draw.rectangle([(field_x, y), (tw - M, y + LH - 2)], fill=field_bg)
+                _rounded(draw, [(field_x, y), (tw - M, y + LH - 2)], r_widget,
+                         fill=field_bg,
+                         outline=s.accent_color if active else (255, 255, 255, 40))
                 draw.text((field_x + 8, y), value,
                           fill=s.accent_color if active else s.text_color, font=self._font)
                 self._widgets.append((y, y + LH, "field", key))
@@ -369,6 +465,9 @@ class Panel:
         fb_w, fb_h = self._fb_width, self._fb_height
         if s.position == "top-right":
             self._panel_x = fb_w - tw - 10
+            self._panel_y = 10
+        elif s.position == "top-left":
+            self._panel_x = 10
             self._panel_y = 10
         elif s.position == "center":
             self._panel_x = (fb_w - tw) // 2
@@ -401,6 +500,11 @@ class Panel:
                 # ptype_tick widgets share a row; disambiguate by x bounds.
                 if widget[2] == "ptype_tick":
                     if widget[5] <= lx < widget[6]:
+                        return widget
+                    continue
+                # Toolbar-style horizontal buttons also share a row.
+                if widget[2] == "hbutton":
+                    if widget[4] <= lx < widget[5]:
                         return widget
                     continue
                 return widget
@@ -854,6 +958,48 @@ class SinkOverlay(Panel):
         self._edit_buffer = ""
 
 
+class ToolbarOverlay(Panel):
+    """Top-left toolbar with one-click actions for the most common
+    operations. on_click returns the action key string for the app to
+    dispatch ("auto_range", "screenshot", "record", "bookmark",
+    "help"), or True/False for consumed/ignored clicks.
+    """
+
+    def __init__(self):
+        super().__init__(TOOLBAR_STYLE)
+        self.enabled = True
+
+    def update(self, recording=False):
+        if not self.enabled:
+            return
+        rec_label = "Stop" if recording else "Rec"
+        self.render_panel([
+            ("button_row", [
+                ("Auto-range", "auto_range"),
+                ("Screenshot", "screenshot"),
+                (rec_label, "record", recording),
+                ("Help", "help"),
+            ]),
+        ])
+
+    def render(self):
+        if not self.enabled:
+            return
+        super().render()
+
+    def on_click(self, x, y):
+        if not self.enabled:
+            return False
+        hit = self._hit_test(x, y)
+        if hit is None:
+            return False
+        if hit in ("outside_close", "inside_miss"):
+            return hit == "inside_miss"
+        if hit[2] == "hbutton":
+            return hit[3]
+        return True
+
+
 class HelpOverlay(Panel):
     """Centered keybinding cheatsheet, toggled with F1 or H."""
 
@@ -1017,7 +1163,8 @@ class UserMenu(Panel):
                vector_fields=None, vector_projection="LOS", vector_projections=None,
                composite_slots=None,
                available_ptypes=None, selected_ptypes=None,
-               ptype_labels=None):
+               ptype_labels=None,
+               fov=None, cam_speed=None):
         self._SD_OPS = sd_ops or ["*"]
         if self._minimized:
             self.render_panel([("button", "[+] Splat", "_toggle_minimize")])
@@ -1088,6 +1235,15 @@ class UserMenu(Panel):
             items.append(("toggle", "Log scale", renderer.log_scale, "log_scale"))
             items.append(("toggle", "Colorbar", self.show_colorbar, "colorbar"))
 
+        # View controls (both modes). Speed is adjusted multiplicatively,
+        # so its track is drawn permanently half-filled.
+        if fov is not None:
+            items.append(("slider", "FOV °", float(fov), 10.0, 140.0, "view_fov"))
+        if cam_speed is not None:
+            items.append(("slider", "Speed", float(cam_speed), 0.0,
+                          max(1e-12, 2.0 * float(cam_speed)), "view_speed"))
+        items.append(("slider", "Smoothing", float(renderer.hsml_scale), 0.1, 5.0, "hsml_scale"))
+
         self._cmap_name = cmap_name
         if render_mode_name == "Composite" and composite_slots:
             # Colorbar uses slot 1 (color channel) limits
@@ -1157,6 +1313,21 @@ class UserMenu(Panel):
         # Common widget handling
         base = self._handle_base_click(widget, x - self._panel_x)
         if base is True:
+            return True
+        if isinstance(base, tuple):
+            action, key, vmin, vmax = base
+            if key == "view_fov":
+                app.camera.adjust_fov(-5.0 if action == "slider_dec" else +5.0)
+            elif key == "view_speed":
+                factor = 1.5
+                app.camera.speed = (
+                    app.camera.speed / factor if action == "slider_dec" else app.camera.speed * factor
+                )
+            elif key == "hsml_scale":
+                step = (vmax - vmin) / 20
+                cur = app.renderer.hsml_scale
+                new = max(vmin, cur - step) if action == "slider_dec" else min(vmax, cur + step)
+                app.renderer.hsml_scale = new
             return True
 
         if wtype == "ptype_tick":
