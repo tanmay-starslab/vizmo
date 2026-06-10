@@ -2742,3 +2742,273 @@ def slice_plane_mode():
 
 
 RenderMode.slice_plane = staticmethod(slice_plane_mode)
+
+
+# ---------------------------------------------------------------------------
+# Isosurface extraction (Section 5.B) + split-screen state (Section 5.F)
+# ---------------------------------------------------------------------------
+
+def voxelize_particles(pos, mass, center, half_size, n_grid):
+    """CIC-voxelize particle masses onto an n_grid^3 mesh (code units).
+
+    Thin wrapper over power_spectrum.cic_deposit so the isosurface and
+    P(k) paths share one deposition kernel. Returns the 3D grid; total
+    deposited mass equals the in-box particle mass (CIC conserves).
+    """
+    from .power_spectrum import cic_deposit
+
+    return cic_deposit(pos, mass, center, half_size, n_grid)
+
+
+def extract_isosurface(grid, level, center, half_size):
+    """Marching cubes on a voxel grid -> world-space mesh.
+
+    Args:
+        grid: (n, n, n) voxelized field.
+        level: iso threshold in grid units.
+        center: (3,) world center of the cube (code units).
+        half_size: half extent of the cube.
+
+    Returns:
+        (verts (V, 3) world code units, faces (F, 3) int, normals (V, 3)).
+    """
+    from skimage.measure import marching_cubes
+
+    n = grid.shape[0]
+    cell = 2.0 * half_size / n
+    verts, faces, normals, _ = marching_cubes(grid, level=level)
+    # Voxel index -> world: cell centers at (i + 0.5) * cell - half.
+    world = (verts + 0.5) * cell - half_size + np.asarray(center)[None, :]
+    return world, faces.astype(np.uint32), normals.astype(np.float32)
+
+
+def mesh_to_obj(path, verts, faces):
+    """Write a mesh as Wavefront OBJ (1-based face indices)."""
+    with open(path, "w") as f:
+        f.write("# vizmo isosurface export\n")
+        for v in verts:
+            f.write(f"v {v[0]:.6g} {v[1]:.6g} {v[2]:.6g}\n")
+        for tri in faces:
+            f.write(f"f {tri[0]+1} {tri[1]+1} {tri[2]+1}\n")
+    return path
+
+
+ISO_COLORS = [(0.35, 0.65, 1.0), (1.0, 0.62, 0.25),
+              (0.45, 0.9, 0.5), (0.95, 0.4, 0.75)]
+
+
+class IsosurfaceRenderer:
+    """Up to 4 simultaneous Phong-shaded isosurface meshes.
+
+    Voxelization + marching cubes run on the CPU (the caller may do so
+    in a background thread); this class owns the GPU vertex buffers and
+    the render pipeline. Vertices are uploaded relative to a reference
+    point and the full-precision translation is folded into the MVP on
+    the CPU in float64, so float32 vertex coordinates stay accurate at
+    cosmological box offsets.
+    """
+
+    MAX_SURFACES = 4
+
+    def __init__(self, device, present_format):
+        self.device = device
+        self.surfaces = []  # dicts: vbo, n_verts, color, opacity, level
+        shader = device.create_shader_module(
+            code=_load_wgsl("isosurface.wgsl"))
+        self._bgl = device.create_bind_group_layout(entries=[
+            {"binding": 0,
+             "visibility": (wgpu.ShaderStage.VERTEX
+                            | wgpu.ShaderStage.FRAGMENT),
+             "buffer": {"type": "uniform"}},
+        ])
+        layout = device.create_pipeline_layout(
+            bind_group_layouts=[self._bgl])
+        self._pipeline = device.create_render_pipeline(
+            layout=layout,
+            vertex={
+                "module": shader, "entry_point": "vs_main",
+                "buffers": [{
+                    "array_stride": 24, "step_mode": "vertex",
+                    "attributes": [
+                        {"format": "float32x3", "offset": 0,
+                         "shader_location": 0},
+                        {"format": "float32x3", "offset": 12,
+                         "shader_location": 1},
+                    ],
+                }],
+            },
+            primitive={"topology": "triangle-list"},
+            fragment={
+                "module": shader, "entry_point": "fs_main",
+                "targets": [{"format": present_format, "blend": {
+                    "color": {"src_factor": "src-alpha",
+                              "dst_factor": "one-minus-src-alpha"},
+                    "alpha": {"src_factor": "one",
+                              "dst_factor": "one-minus-src-alpha"},
+                }}],
+            },
+        )
+
+    def set_surface(self, idx, verts, faces, normals, color, opacity,
+                    level, ref=None):
+        """Upload a mesh as surface `idx` (expanded triangle soup)."""
+        if ref is None:
+            ref = verts.mean(axis=0)
+        tri_v = (verts[faces.reshape(-1)] - ref[None, :]).astype(np.float32)
+        tri_n = normals[faces.reshape(-1)].astype(np.float32)
+        inter = np.empty((len(tri_v), 6), dtype=np.float32)
+        inter[:, :3] = tri_v
+        inter[:, 3:] = tri_n
+        dev = self.device
+        vbo = dev.create_buffer_with_data(
+            data=inter.tobytes(), usage=wgpu.BufferUsage.VERTEX)
+        ubuf = dev.create_buffer(
+            size=96, usage=(wgpu.BufferUsage.UNIFORM
+                            | wgpu.BufferUsage.COPY_DST))
+        bg = dev.create_bind_group(
+            layout=self._bgl,
+            entries=[{"binding": 0, "resource": {"buffer": ubuf}}])
+        entry = {"vbo": vbo, "n": len(tri_v), "ubuf": ubuf, "bg": bg,
+                 "color": color, "opacity": opacity, "level": level,
+                 "ref": np.asarray(ref, dtype=np.float64),
+                 "verts": verts, "faces": faces}
+        while len(self.surfaces) <= idx:
+            self.surfaces.append(None)
+        self.surfaces[idx] = entry
+
+    def clear(self):
+        self.surfaces = []
+
+    def write_uniforms(self, camera):
+        """Per-surface MVP (float64 fold of the ref translation)."""
+        view = camera.view_matrix().astype(np.float64)
+        proj = camera.projection_matrix().astype(np.float64)
+        for s in self.surfaces:
+            if s is None:
+                continue
+            t = np.eye(4)
+            t[:3, 3] = s["ref"]
+            mvp = (proj @ view @ t).astype(np.float32)
+            buf = np.zeros(24, dtype=np.float32)
+            buf[:16] = mvp.T.reshape(-1)  # wgsl column-major
+            buf[16:19] = s["color"]
+            buf[19] = s["opacity"]
+            buf[20:23] = (-camera.forward).astype(np.float32)
+            self.device.queue.write_buffer(s["ubuf"], 0, buf.tobytes())
+
+    def render_to_pass(self, rpass):
+        for s in self.surfaces:
+            if s is None or s["n"] == 0:
+                continue
+            rpass.set_pipeline(self._pipeline)
+            rpass.set_bind_group(0, s["bg"])
+            rpass.set_vertex_buffer(0, s["vbo"])
+            rpass.draw(s["n"])
+
+
+@dataclass
+class RenderState:
+    """Per-viewport display state for split-screen mode (Section 5.F).
+
+    Each half of a split view owns one of these; mutating one side
+    never touches the other (verified in tests/test_split.py).
+    """
+
+    field: str = "Masses"
+    colormap: str = "magma"
+    render_mode: str = "SurfaceDensity"
+    qty_min: float = -1.0
+    qty_max: float = 3.0
+    log_scale: int = 1
+
+
+SPLIT_MODES = [None, "lr", "tb"]
+
+
+def _append_split_resolve(renderer, encoder, screen_view, width, height,
+                          left_state, right_state, orientation="lr"):
+    """Two viewport-restricted resolve passes for split-screen mode.
+
+    Left/top half resolves accumulation set 1 with the main colormap;
+    right/bottom half resolves set 2 (the composite slot-1
+    accumulation) with the renderer's split colormap. Params for each
+    side come from its RenderState. The caller must have filled both
+    accum sets (the composite accumulation path does exactly that).
+    """
+    import struct
+
+    dev = renderer.device
+    if getattr(renderer, "_split_params_bufs", None) is None:
+        renderer._split_params_bufs = [
+            dev.create_buffer(size=16,
+                              usage=(wgpu.BufferUsage.UNIFORM
+                                     | wgpu.BufferUsage.COPY_DST))
+            for _ in range(2)]
+        renderer._split_bgs = [None, None]
+
+    states = [left_state, right_state]
+    accums = [renderer._accum_textures, renderer._accum_textures2]
+    cmap_views = [renderer._colormap_tex_view,
+                  getattr(renderer, "_split_cmap_view", None)
+                  or renderer._colormap_tex_view]
+    for i in (0, 1):
+        st = states[i]
+        resolve_mode = {"SurfaceDensity": 0, "WeightedAverage": 1,
+                        "WeightedVariance": 2}.get(st.render_mode, 0)
+        dev.queue.write_buffer(
+            renderer._split_params_bufs[i], 0,
+            struct.pack("ffII", st.qty_min, st.qty_max, resolve_mode,
+                        st.log_scale))
+        if renderer._split_bgs[i] is None and accums[i] is not None:
+            renderer._split_bgs[i] = dev.create_bind_group(
+                layout=renderer._resolve_bgl,
+                entries=[
+                    {"binding": 0,
+                     "resource": {"buffer": renderer._split_params_bufs[i]}},
+                    {"binding": 1, "resource": accums[i]["views"][0]},
+                    {"binding": 2, "resource": accums[i]["views"][1]},
+                    {"binding": 3, "resource": accums[i]["views"][2]},
+                    {"binding": 4, "resource": cmap_views[i]},
+                    {"binding": 5,
+                     "resource": renderer._colormap_sampler},
+                ])
+
+    rpass = encoder.begin_render_pass(color_attachments=[{
+        "view": screen_view, "clear_value": (0, 0, 0, 1),
+        "load_op": "clear", "store_op": "store"}])
+    for i in (0, 1):
+        if renderer._split_bgs[i] is None:
+            continue
+        if orientation == "lr":
+            x, y = (0 if i == 0 else width // 2), 0
+            w, h = width // 2, height
+        else:
+            x, y = 0, (0 if i == 0 else height // 2)
+            w, h = width, height // 2
+        rpass.set_viewport(float(x), float(y), float(w), float(h),
+                           0.0, 1.0)
+        rpass.set_scissor_rect(x, y, w, h)
+        rpass.set_pipeline(renderer._resolve_pipeline)
+        rpass.set_bind_group(0, renderer._split_bgs[i])
+        rpass.draw(3, 1, 0, 0)
+    rpass.end()
+
+
+def set_split_colormap(renderer, rgba_data):
+    """Upload the right/bottom pane's colormap as a separate texture."""
+    dev = renderer.device
+    tex = dev.create_texture(
+        size=(rgba_data.shape[0], 1, 1), format="rgba8unorm",
+        usage=(wgpu.TextureUsage.TEXTURE_BINDING
+               | wgpu.TextureUsage.COPY_DST))
+    dev.queue.write_texture(
+        {"texture": tex, "mip_level": 0, "origin": (0, 0, 0)},
+        np.ascontiguousarray(rgba_data).tobytes(),
+        {"bytes_per_row": rgba_data.shape[0] * 4, "rows_per_image": 1},
+        (rgba_data.shape[0], 1, 1))
+    renderer._split_cmap_view = tex.create_view()
+    renderer._split_bgs = [None, None]  # rebind with the new texture
+
+
+WGPURenderer.append_split_resolve = _append_split_resolve
+WGPURenderer.set_split_colormap = set_split_colormap

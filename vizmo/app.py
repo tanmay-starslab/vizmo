@@ -80,6 +80,14 @@ def main():
         "WeightedAverage is implied when --field is a non-mass field)",
     )
     parser.add_argument(
+        "--split",
+        type=str,
+        default=None,
+        metavar="SNAP2.hdf5",
+        help="Load a second snapshot for split-screen comparison "
+        "(Shift+S cycles layouts)",
+    )
+    parser.add_argument(
         "--series",
         action="store_true",
         help="Treat the positional path as a directory of snapshots; "
@@ -139,6 +147,7 @@ def main():
                 mode=args.mode,
                 filters=args.filter,
                 series=args.series,
+                split_snapshot=args.split,
             )
         finally:
             pr.disable()
@@ -167,6 +176,7 @@ def main():
             mode=args.mode,
             filters=args.filter,
             series=args.series,
+            split_snapshot=args.split,
         )
 
 

@@ -1009,7 +1009,8 @@ class AnalysisDrawer(Panel):
                   "spectrum": "Power spectrum",
                   "orbit": "Orbit integration",
                   "sightline": "Absorption sightlines",
-                  "slice": "Slice plane"}
+                  "slice": "Slice plane",
+                  "isosurface": "Isosurface"}
         title = titles.get(self.mode, "")
 
         plot_img, caption = (None, "")
@@ -1041,6 +1042,22 @@ class AnalysisDrawer(Panel):
             ]
             if props.get("circularity") is not None:
                 rows.append(("circularity", f"{props['circularity']:+.2f}"))
+        elif self.mode == "isosurface":
+            st = getattr(self, "iso_state", None)
+            if st is None or not st.get("surfaces"):
+                rows = [("No surfaces", "press Add to extract"),
+                        ("Field", (st or {}).get("field", "?")),
+                        ("Resolution",
+                         f"{(st or {}).get('res', 128)}^3")]
+            else:
+                rows = [("Field", st.get("field", "?")),
+                        ("Resolution", f"{st.get('res', 128)}^3"),
+                        ("Backend",
+                         "computing..." if st.get("busy") else "ready")]
+                for i, s in enumerate(st["surfaces"]):
+                    rows.append((f"  S{i + 1} level",
+                                 f"{s['level']:.3g} "
+                                 f"(op {s['opacity']:.1f})"))
         elif self.mode == "slice":
             st = getattr(self, "slice_state", None)
             if st is None or not st.get("active"):
@@ -1242,6 +1259,15 @@ class AnalysisDrawer(Panel):
             bx = fbtn(bx, "Compute", "orbit_compute")
             bx = fbtn(bx, "CSV", "orbit_csv")
             bx = fbtn(bx, "Stream", "orbit_stream")
+        elif self.mode == "isosurface":
+            bx = M
+            bx = fbtn(bx, "Add", "iso_add")
+            bx = fbtn(bx, "Lv-", "iso_down")
+            bx = fbtn(bx, "Lv+", "iso_up")
+            bx = fbtn(bx, "Res", "iso_res")
+            bx = fbtn(bx, "Op", "iso_op")
+            bx = fbtn(bx, "OBJ", "iso_obj")
+            bx = fbtn(bx, "Clear", "iso_clear")
         elif self.mode == "slice":
             bx = M
             bx = fbtn(bx, "Axis", "slice_axis")

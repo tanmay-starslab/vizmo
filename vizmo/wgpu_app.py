@@ -43,6 +43,7 @@ def run_wgpu_app(
     mode=None,
     filters=None,
     series=False,
+    split_snapshot=None,
 ):
     """Run the vizmo application with the wgpu backend.
 
@@ -56,6 +57,7 @@ def run_wgpu_app(
     # --series: the positional path is a directory; discover the time
     # series and start from the first (highest-z) snapshot.
     _series = {"snaps": [], "index": 0, "pending": None}
+    _split_snapshot_path = split_snapshot
     if series:
         from .series import discover_snapshots
 
@@ -131,6 +133,17 @@ def run_wgpu_app(
 
     data = SnapshotData(snapshot_path, particle_types=types, hsml_progress=_hsml_progress)
     print(f"  {data.n_particles:,} particles loaded (types {data.particle_types})")
+    data2 = None
+    if _split_snapshot_path:
+        # --split: second dataset loaded for side-by-side comparison.
+        # Rendering its particles needs a second GPU pipeline (not yet
+        # implemented); the right pane shows this snapshot's slot-1
+        # field meanwhile.
+        data2 = SnapshotData(os.path.abspath(_split_snapshot_path),
+                             particle_types=types)
+        print(f"  [split] second snapshot loaded: "
+              f"{data2.n_particles:,} particles (right-pane particle "
+              f"rendering not yet implemented)")
 
     # Camera
     camera = Camera(fov=fov, aspect=width / height)
@@ -291,6 +304,82 @@ def run_wgpu_app(
         "size_kpc": 0.0, "offset_kpc": 0.0,
     }
     drawer.slice_state = _slice
+
+    from .wgpu_renderer import (IsosurfaceRenderer, ISO_COLORS,
+                                voxelize_particles, extract_isosurface,
+                                mesh_to_obj, RenderState, SPLIT_MODES)
+
+    iso_renderer = IsosurfaceRenderer(device, present_format)
+    _iso = {"surfaces": [], "res": 128, "field": "Masses",
+            "busy": False, "grid": None, "half": None, "center": None}
+    drawer.iso_state = _iso
+
+    def _iso_recompute(add_new=False):
+        import threading
+
+        if _iso["busy"]:
+            toasts.show("Isosurface busy...", "warn")
+            return
+        center = _focus_center()
+        d_cam = float(np.linalg.norm(camera.position - center))
+        half = max(d_cam * 0.6, 1e-6)
+        field = (_state["_wa_data_field"]
+                 if _state["_render_mode_name"] in
+                 ("WeightedAverage", "WeightedVariance")
+                 else _state["_sd_field"])
+        _iso["field"] = field
+        vals = (None if field == "Masses"
+                else np.asarray(data.get_field(field), dtype=np.float64)
+                * data.masses)
+        pos = data.positions
+        masses = data.masses
+        res = _iso["res"]
+        _iso["busy"] = True
+
+        def work():
+            try:
+                grid_m = voxelize_particles(pos, masses, center,
+                                            half, res)
+                if vals is None:
+                    grid = grid_m
+                else:
+                    grid_f = voxelize_particles(pos, vals, center,
+                                                half, res)
+                    with np.errstate(invalid="ignore",
+                                     divide="ignore"):
+                        grid = np.where(grid_m > 0, grid_f / grid_m, 0.0)
+                _iso["grid"] = grid
+                _iso["half"] = half
+                _iso["center"] = center
+                if add_new or not _iso["surfaces"]:
+                    pos_g = grid[grid > 0]
+                    lev = (float(np.percentile(pos_g, 50))
+                           if pos_g.size else 0.5)
+                    if len(_iso["surfaces"]) < iso_renderer.MAX_SURFACES:
+                        _iso["surfaces"].append(
+                            {"level": lev, "opacity": 0.55})
+                for i, s in enumerate(_iso["surfaces"]):
+                    v, fc, nm = extract_isosurface(grid, s["level"],
+                                                   center, half)
+                    iso_renderer.set_surface(
+                        i, v, fc, nm, ISO_COLORS[i % len(ISO_COLORS)],
+                        s["opacity"], s["level"])
+                toasts.show(
+                    f"Isosurface ready: {len(_iso['surfaces'])} "
+                    f"surface(s) at {res}^3", "ok")
+            except Exception as e:
+                toasts.show(f"Isosurface failed: {e}", "error")
+            finally:
+                _iso["busy"] = False
+                drawer.refresh()
+
+        threading.Thread(target=work, daemon=True).start()
+        toasts.show(f"Voxelizing {res}^3 in background...", "info")
+
+    _split = {"mode_idx": 0,
+              "left": RenderState(),
+              "right": RenderState(colormap="viridis"),
+              "snapshot2": None}
 
     def _slice_normal():
         name, vec = _SLICE_NORMALS[_slice["normal_idx"]]
@@ -752,8 +841,23 @@ def run_wgpu_app(
                     _series["pending"] = new_i
                 else:
                     toasts.show("End of series", "warn")
+            elif key == glfw.KEY_I and (mods & glfw.MOD_SHIFT):
+                drawer.toggle("isosurface")
+                if drawer.mode == "isosurface" and not _iso["surfaces"]:
+                    _iso_recompute(add_new=True)
             elif key == glfw.KEY_Z and (mods & glfw.MOD_SHIFT):
-                if not _slice["active"]:
+                if (drawer.mode == "isosurface" and _iso["surfaces"]
+                        and _iso["grid"] is not None):
+                    s = _iso["surfaces"][-1]
+                    g = _iso["grid"]
+                    gmax = float(g.max()) if g.size else 1.0
+                    s["level"] = s["level"] * (10 ** 0.5)
+                    if s["level"] > gmax:
+                        pos_g = g[g > 0]
+                        s["level"] = (float(np.percentile(pos_g, 10))
+                                      if pos_g.size else gmax / 100)
+                    _iso_recompute()
+                elif not _slice["active"]:
                     _slice["active"] = True
                     drawer.enabled = True
                     drawer.mode = "slice"
@@ -764,6 +868,21 @@ def run_wgpu_app(
                 toasts.show(
                     f"Slice plane: normal {_slice['normal_label']} "
                     f"(Shift+Z cycles, Esc closes)")
+            elif key == glfw.KEY_S and (mods & glfw.MOD_SHIFT):
+                _split["mode_idx"] = (_split["mode_idx"] + 1) % len(SPLIT_MODES)
+                mode_now = SPLIT_MODES[_split["mode_idx"]]
+                if mode_now is not None:
+                    _state["_render_mode_name"] = "Composite"
+                    app_proxy._apply_render_mode(auto_range=False)
+                    from .colormaps import colormap_to_texture_data as _ctd
+
+                    renderer.set_split_colormap(
+                        _ctd(_split["right"].colormap))
+                    toasts.show(
+                        f"Split screen: {mode_now.upper()} — left=slot0, "
+                        f"right=slot1 (edit via Composite controls)")
+                else:
+                    toasts.show("Split screen off")
             elif key == glfw.KEY_F9:
                 vis = not scale_bar.enabled
                 scale_bar.enabled = vis
@@ -1068,6 +1187,41 @@ def run_wgpu_app(
                     scale_bar._last_key = None
                     app_proxy._apply_render_mode(auto_range=False)
                     toasts.show("View center moved to picked particle", "ok")
+                elif dr_action in ("iso_add", "iso_down", "iso_up",
+                                   "iso_res", "iso_op", "iso_obj",
+                                   "iso_clear"):
+                    if dr_action == "iso_add":
+                        _iso_recompute(add_new=True)
+                    elif dr_action in ("iso_down", "iso_up") and _iso["surfaces"]:
+                        f = 10 ** (0.25 if dr_action == "iso_up" else -0.25)
+                        _iso["surfaces"][-1]["level"] *= f
+                        _iso_recompute()
+                    elif dr_action == "iso_res":
+                        cyc = [64, 128, 256]
+                        _iso["res"] = cyc[(cyc.index(_iso["res"]) + 1)
+                                          % len(cyc)]
+                        _iso_recompute()
+                    elif dr_action == "iso_op" and _iso["surfaces"]:
+                        s = _iso["surfaces"][-1]
+                        s["opacity"] = round((s["opacity"] + 0.15) % 1.05, 2)
+                        if s["opacity"] < 0.1:
+                            s["opacity"] = 0.15
+                        _iso_recompute()
+                    elif dr_action == "iso_obj":
+                        sfc = [s for s in iso_renderer.surfaces
+                               if s is not None]
+                        if sfc:
+                            out = os.path.join(
+                                screenshot_dir or ".",
+                                f"vizmo_iso_{int(time.time())}.obj")
+                            mesh_to_obj(out, sfc[-1]["verts"],
+                                        sfc[-1]["faces"])
+                            toasts.show(
+                                f"OBJ: {os.path.basename(out)}", "ok")
+                    elif dr_action == "iso_clear":
+                        _iso["surfaces"].clear()
+                        iso_renderer.clear()
+                        drawer.refresh()
                 elif dr_action in ("slice_axis", "slice_back", "slice_fwd",
                                    "slice_op_down", "slice_op_up",
                                    "slice_res"):
@@ -2260,6 +2414,22 @@ def run_wgpu_app(
                         skip_los_recompute=translated,
                         skip_accum=skip_accum_this_frame,
                     )
+                    if SPLIT_MODES[_split["mode_idx"]] is not None:
+                        # Split screen: overdraw the composite with two
+                        # viewport-restricted resolves (left/top =
+                        # slot 0, right/bottom = slot 1, each with its
+                        # own RenderState + colormap).
+                        s0, s1 = _state["_slot"][0], _state["_slot"][1]
+                        for st, sl in ((_split["left"], s0),
+                                       (_split["right"], s1)):
+                            st.qty_min, st.qty_max = sl["min"], sl["max"]
+                            st.log_scale = int(sl["log"])
+                            st.render_mode = sl["mode"]
+                            st.field = sl.get("data", sl["weight"])
+                        renderer.append_split_resolve(
+                            _frame_encoder, _frame_screen_view,
+                            fb_w, fb_h, _split["left"], _split["right"],
+                            orientation=SPLIT_MODES[_split["mode_idx"]])
                 else:
                     renderer.render(
                         camera,
@@ -2494,6 +2664,9 @@ def run_wgpu_app(
                     aperture_panel.render_to_pass(rpass)
                 if sightline_overlay.enabled and _sightlines["list"]:
                     sightline_overlay.render_to_pass(rpass)
+                if iso_renderer.surfaces and not _iso["busy"]:
+                    iso_renderer.write_uniforms(camera)
+                    iso_renderer.render_to_pass(rpass)
                 if _slice["active"] and slice_renderer.grid is not None:
                     geom = _slice.get("_geom")
                     if geom is not None:

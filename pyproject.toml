@@ -21,6 +21,7 @@ dependencies = [
     "meshoid",
     "yt",
     "cmasher",
+    "scikit-image",
 ]
 
 [project.scripts]
