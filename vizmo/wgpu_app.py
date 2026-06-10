@@ -380,7 +380,12 @@ def run_wgpu_app(
                 renderer.set_colormap(colormap_to_texture_data(AVAILABLE_COLORMAPS[_cmap_idx]))
                 _state["_cmap_idx"] = _cmap_idx
             elif key == glfw.KEY_P:
-                _take_screenshot()
+                if mods & glfw.MOD_CONTROL:
+                    _export_publication()
+                else:
+                    _take_screenshot()
+            elif key == glfw.KEY_E and (mods & glfw.MOD_CONTROL):
+                _export_region_cutout()
             elif key == glfw.KEY_F1 or key == glfw.KEY_H:
                 help_panel.enabled = not help_panel.enabled
             elif key == glfw.KEY_BACKSLASH:
@@ -474,7 +479,10 @@ def run_wgpu_app(
             elif key == glfw.KEY_RIGHT_BRACKET:
                 camera.adjust_fov(+5.0)
                 dirty = True
-        camera.on_key(key, action)
+        # Ctrl chords (Ctrl+E export, Ctrl+P figure) must not leak into
+        # flight controls (E is roll).
+        if not (mods & glfw.MOD_CONTROL):
+            camera.on_key(key, action)
 
     glfw.set_key_callback(window, key_callback)
 
@@ -679,8 +687,22 @@ def run_wgpu_app(
                         _state["_needs_auto_range"] = True
                 elif tb_action == "screenshot":
                     _take_screenshot()
+                elif tb_action == "publication":
+                    _export_publication()
                 elif tb_action == "record":
                     _toggle_recording()
+                elif tb_action in ("inspector", "phase", "profile", "stats"):
+                    if tb_action == "stats":
+                        drawer.refresh()
+                    drawer.toggle(tb_action)
+                elif tb_action == "orbit":
+                    if camera.orbit is not None:
+                        camera.stop_orbit()
+                        toasts.show("Orbit off")
+                    elif camera.start_orbit(data.get_view_center()):
+                        toasts.show("Orbiting view center", "ok")
+                elif tb_action == "export_region":
+                    _export_region_cutout()
                 elif tb_action == "help":
                     help_panel.enabled = not help_panel.enabled
                 return
@@ -968,6 +990,73 @@ def run_wgpu_app(
         if not quiet:
             toasts.show(f"Screenshot saved: {os.path.basename(path)}", "ok")
         return os.path.abspath(path)
+
+    def _export_publication():
+        """Render a clean frame and burn in colorbar + scale bar + caption."""
+        import os
+        import tempfile
+
+        ts = int(time.time())
+        tmp = os.path.join(tempfile.gettempdir(), f"vizmo_raw_{ts}.png")
+        out = os.path.join(screenshot_dir or ".", f"vizmo_fig_{ts}.png")
+        try:
+            _take_screenshot(tmp, quiet=True)
+            from .export import annotate_screenshot
+            from .physics import field_unit_label
+
+            if _state["_composite"]:
+                s1 = _state["_slot"][1]
+                qmin, qmax, qlog = s1["min"], s1["max"], bool(s1["log"])
+                field = s1["data"] if s1["mode"] != "SurfaceDensity" else s1["weight"]
+            else:
+                qmin, qmax = renderer.qty_min, renderer.qty_max
+                qlog = bool(renderer.log_scale)
+                field = (
+                    _state["_wa_data_field"]
+                    if _state["_render_mode_name"] in ("WeightedAverage", "WeightedVariance")
+                    else _state["_sd_field"]
+                )
+            center = data.get_view_center()
+            dist = float(np.linalg.norm(camera.position - center))
+            fb_w_, fb_h_ = glfw.get_framebuffer_size(window)
+            world_h = 2.0 * dist * np.tan(np.radians(camera.fov) / 2.0)
+            kpc_per_px = world_h * units.length_to_kpc / max(fb_h_, 1)
+            zcap = (f"z={units.redshift:.2f}   "
+                    if units.cosmological and units.redshift > 1e-3 else "")
+            caption = (f"{os.path.basename(snapshot_path)}   {zcap}"
+                       f"{_state['_render_mode_name']}")
+            annotate_screenshot(
+                tmp, out,
+                cmap_name=AVAILABLE_COLORMAPS[_state["_cmap_idx"]],
+                qty_min=qmin, qty_max=qmax, log_scale=qlog,
+                field_label=field, unit_label=field_unit_label(field),
+                kpc_per_px=kpc_per_px, caption=caption,
+            )
+            print(f"  Publication figure: {out}")
+            toasts.show(f"Figure saved: {os.path.basename(out)}", "ok")
+        except Exception as e:
+            toasts.show(f"Figure export failed: {e}", "error")
+        finally:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+
+    def _export_region_cutout():
+        """Write the sphere around the view center to an HDF5 cutout."""
+        import os
+
+        try:
+            from .export import export_region
+
+            radius = drawer._stats_radius_kpc  # None -> auto (25th pct)
+            out = os.path.join(screenshot_dir or ".",
+                               f"vizmo_region_{int(time.time())}.hdf5")
+            path, n = export_region(data, radius_kpc=radius, path=out)
+            print(f"  Region cutout: {path} ({n:,} particles)")
+            toasts.show(f"Cutout saved: {n:,} particles", "ok")
+        except Exception as e:
+            toasts.show(f"Cutout export failed: {e}", "error")
 
     print("vizmo [wgpu] running. WASD=move, mouse=look, F1/H=help, ESC=quit, R=auto-range, P=screenshot.")
 
@@ -1442,7 +1531,11 @@ def run_wgpu_app(
                 toolbar.set_framebuffer_size(fb_w, fb_h)
                 for p in (scale_bar, status_bar, toasts, gizmo, drawer):
                     p.set_framebuffer_size(fb_w, fb_h)
-                toolbar.update(recording=_recording["dir"] is not None)
+                toolbar.update(
+                    recording=_recording["dir"] is not None,
+                    orbiting=camera.orbit is not None,
+                    drawer_mode=drawer.mode if drawer.enabled else None,
+                )
 
                 # Science chrome (each panel dirty-checks internally)
                 view_center = data.get_view_center()

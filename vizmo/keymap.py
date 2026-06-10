@@ -17,6 +17,8 @@ KEYBINDINGS = [
     ("C", "Cycle colormap"),
     (", / .", "Halve / double detail ceiling (subsample cap)"),
     ("P", "Save screenshot"),
+    ("Ctrl+P", "Publication figure (colorbar + scale bar burned in)"),
+    ("Ctrl+E", "Export sphere around center to HDF5 cutout"),
     ("V", "Start / stop frame recording (movie export)"),
     ("Shift+Click", "Pick particle under cursor (opens inspector)"),
     ("I", "Toggle particle inspector"),
