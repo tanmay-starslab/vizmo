@@ -538,7 +538,38 @@ def run_wgpu_app(
                 else:
                     _take_screenshot()
             elif key == glfw.KEY_E and (mods & glfw.MOD_CONTROL):
-                _export_region_cutout()
+                if mods & glfw.MOD_SHIFT:
+                    try:
+                        from .export import export_all_data
+
+                        profiles = {}
+                        if drawer._last_profile is not None:
+                            r, prof, fld, unit = drawer._last_profile
+                            profiles[fld] = (r, prof, fld, unit)
+                        sc_center, sc_radius = drawer._active_scope()
+                        from .analysis import (halo_properties,
+                                               region_stats)
+
+                        rows, used_r = region_stats(
+                            data, center=sc_center, radius_kpc=sc_radius)
+                        halo_rows = halo_properties(
+                            data, center=sc_center, radius_kpc=used_r)
+                        meta = {"snapshot": snapshot_path,
+                                "redshift": float(units.redshift),
+                                "radius_kpc": used_r}
+                        zp = export_all_data(
+                            screenshot_dir or ".", profiles=profiles,
+                            stats_rows=rows, halo_rows=halo_rows,
+                            phase=drawer._last_phase,
+                            sightlines=_sightlines["list"] or None,
+                            metadata=meta)
+                        toasts.show(
+                            f"Bundle: {os.path.basename(zp)}", "ok",
+                            duration=6.0)
+                    except Exception as e:
+                        toasts.show(f"Bundle failed: {e}", "error")
+                else:
+                    _export_region_cutout()
             elif key == glfw.KEY_F1 or key == glfw.KEY_H:
                 help_panel.enabled = not help_panel.enabled
             elif key == glfw.KEY_BACKSLASH:
@@ -971,8 +1002,8 @@ def run_wgpu_app(
                 elif dr_action == "orbit_stream":
                     _compute_orbit(stream=True)
                 elif dr_action in ("profile_csv", "phase_save",
-                                   "stats_json", "spectrum_csv",
-                                   "orbit_csv"):
+                                   "stats_json", "stats_latex",
+                                   "spectrum_csv", "orbit_csv"):
                     _handle_drawer_export(dr_action)
                 elif (isinstance(dr_action, tuple) and dr_action
                         and str(dr_action[0]).startswith("f_")):
@@ -1530,6 +1561,20 @@ def run_wgpu_app(
                 out = os.path.join(base, f"vizmo_orbit_{ts}.csv")
                 orbit_to_csv(out, drawer._last_orbit[0])
                 toasts.show(f"Orbit saved: {os.path.basename(out)}", "ok")
+            elif action == "stats_latex":
+                from .analysis import region_stats, halo_properties
+                from .export import export_latex_table
+
+                sc_center, sc_radius = drawer._active_scope()
+                r_use = (sc_radius if sc_radius is not None
+                         else drawer._stats_radius_kpc)
+                rows, used_r = region_stats(data, center=sc_center,
+                                            radius_kpc=r_use)
+                halo_rows = halo_properties(data, center=sc_center,
+                                            radius_kpc=used_r)
+                out = os.path.join(base, f"vizmo_stats_{ts}.tex")
+                export_latex_table(list(rows) + halo_rows, out)
+                toasts.show(f"LaTeX table: {os.path.basename(out)}", "ok")
             elif action == "spectrum_csv" and drawer._last_ps is not None:
                 from .power_spectrum import power_spectrum_to_csv
 

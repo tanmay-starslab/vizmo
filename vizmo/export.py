@@ -357,3 +357,218 @@ def export_region(data, center=None, radius_kpc=None, path=None):
         info.attrs["radius_kpc"] = radius_kpc
         info.attrs["source"] = os.path.abspath(getattr(data, "path", ""))
     return os.path.abspath(path), n_written
+
+
+# ---------------------------------------------------------------------------
+# LaTeX table export
+# ---------------------------------------------------------------------------
+
+LATEX_SYMBOLS = {
+    "M200c": (r"$M_{200c}$", r"$\mathrm{M_\odot}$"),
+    "R200c": (r"$R_{200c}$", "kpc"),
+    "M500c": (r"$M_{500c}$", r"$\mathrm{M_\odot}$"),
+    "R500c": (r"$R_{500c}$", "kpc"),
+    "c_NFW": (r"$c_{\mathrm{NFW}}$", "--"),
+    "lambda_spin": (r"$\lambda$", "--"),
+    "beta_anisotropy": (r"$\beta$", "--"),
+    "f_gas": (r"$f_{\mathrm{gas}}$", "--"),
+    "f_cold(T<2e4K)": (r"$f_{\mathrm{cold}}$", "--"),
+    "f_baryon": (r"$f_{\mathrm{b}}$", "--"),
+    "dM/dt boundary": (r"$\dot{M}_{\mathrm{boundary}}$",
+                       r"$\mathrm{M_\odot\,yr^{-1}}$"),
+    "D/T (|eps|>0.7)": (r"$D/T$", "--"),
+    "Total mass": (r"$M_{\mathrm{tot}}$", r"$\mathrm{M_\odot}$"),
+    "Half-mass r": (r"$r_{1/2}$", "kpc"),
+    "SFR": (r"$\mathrm{SFR}$", r"$\mathrm{M_\odot\,yr^{-1}}$"),
+    "<T> (mass-wtd)": (r"$\langle T \rangle$", "K"),
+    "<Z>": (r"$\langle Z \rangle$", r"$\mathrm{Z_\odot}$"),
+    "<v_r>": (r"$\langle v_r \rangle$", r"$\mathrm{km\,s^{-1}}$"),
+    "Radius": (r"$R_{\mathrm{ap}}$", "kpc"),
+    "Particles": (r"$N_{\mathrm{part}}$", "--"),
+}
+
+
+def _latex_number(text):
+    """'4.109e+10 Msun' -> '$4.11 \\times 10^{10}$' (3 sig figs)."""
+    tok = str(text).split()[0].replace(",", "")
+    try:
+        v = float(tok)
+    except ValueError:
+        return str(text).replace("_", r"\_")
+    if v == 0:
+        return "$0$"
+    exp = int(np.floor(np.log10(abs(v))))
+    if -2 <= exp <= 3:
+        return f"${v:.3g}$"
+    mant = v / 10.0**exp
+    return rf"${mant:.2f} \times 10^{{{exp}}}$"
+
+
+def export_latex_table(rows, output_path: str) -> str:
+    """Write (label, value) stat rows as a bare LaTeX tabular block.
+
+    Only the tabular environment is emitted (no preamble), ready for
+    \\input{} into a paper. Labels found in LATEX_SYMBOLS get proper
+    math symbols and units; unknown labels are escaped verbatim.
+    """
+    lines = [r"\begin{tabular}{lcc}", r"\hline",
+             r"Quantity & Value & Unit \\", r"\hline"]
+    for label, value in rows:
+        if str(label).startswith("---"):
+            lines.append(r"\hline")
+            continue
+        sym, unit = LATEX_SYMBOLS.get(
+            label.strip(), (label.strip().replace("_", r"\_"), "--"))
+        lines.append(f"{sym} & {_latex_number(value)} & {unit} \\\\")
+    lines += [r"\hline", r"\end{tabular}", ""]
+    tmp = str(output_path) + ".tmp"
+    with open(tmp, "w") as f:
+        f.write("\n".join(lines))
+    os.replace(tmp, output_path)
+    return output_path
+
+
+# ---------------------------------------------------------------------------
+# VTK (VTU) export
+# ---------------------------------------------------------------------------
+
+def export_vtk(pos, fields, output_path: str, aperture_region=None) -> str:
+    """Export particles as a VTK UnstructuredGrid (.vtu, ASCII XML).
+
+    No external dependency: writes the (well-documented) VTU XML by
+    hand. `pos` is (N, 3) in kpc; `fields` maps names to (N,) scalar or
+    (N, 3) vector arrays, written as PointData. Each particle is a
+    VTK_VERTEX cell, so ParaView/VisIt load the cloud directly.
+    """
+    pos = np.asarray(pos, dtype=np.float64)
+    if aperture_region is not None:
+        keep = aperture_region.contains(pos)
+        pos = pos[keep]
+        fields = {k: np.asarray(v)[keep] for k, v in fields.items()}
+    n = len(pos)
+
+    def arr_to_text(a):
+        return "\n".join(
+            " ".join(f"{x:.7g}" for x in np.atleast_1d(row))
+            for row in a)
+
+    parts = []
+    parts.append('<?xml version="1.0"?>')
+    parts.append('<VTKFile type="UnstructuredGrid" version="0.1" '
+                 'byte_order="LittleEndian">')
+    parts.append("<UnstructuredGrid>")
+    parts.append(f'<Piece NumberOfPoints="{n}" NumberOfCells="{n}">')
+    parts.append("<Points>")
+    parts.append('<DataArray type="Float64" NumberOfComponents="3" '
+                 'format="ascii">')
+    parts.append(arr_to_text(pos))
+    parts.append("</DataArray></Points>")
+    parts.append("<PointData>")
+    for name, arr in fields.items():
+        arr = np.asarray(arr)
+        ncomp = 3 if arr.ndim == 2 else 1
+        parts.append(f'<DataArray type="Float64" Name="{name}" '
+                     f'NumberOfComponents="{ncomp}" format="ascii">')
+        parts.append(arr_to_text(arr))
+        parts.append("</DataArray>")
+    parts.append("</PointData>")
+    parts.append("<Cells>")
+    parts.append('<DataArray type="Int64" Name="connectivity" format="ascii">')
+    parts.append(" ".join(str(i) for i in range(n)))
+    parts.append("</DataArray>")
+    parts.append('<DataArray type="Int64" Name="offsets" format="ascii">')
+    parts.append(" ".join(str(i + 1) for i in range(n)))
+    parts.append("</DataArray>")
+    parts.append('<DataArray type="UInt8" Name="types" format="ascii">')
+    parts.append(" ".join("1" for _ in range(n)))  # VTK_VERTEX
+    parts.append("</DataArray>")
+    parts.append("</Cells>")
+    parts.append("</Piece></UnstructuredGrid></VTKFile>")
+    tmp = str(output_path) + ".tmp"
+    with open(tmp, "w") as f:
+        f.write("\n".join(parts))
+    os.replace(tmp, output_path)
+    return output_path
+
+
+# ---------------------------------------------------------------------------
+# ZIP bundle export
+# ---------------------------------------------------------------------------
+
+def export_all_data(output_dir: str, profiles=None, stats_rows=None,
+                    halo_rows=None, phase=None, sightlines=None,
+                    metadata=None) -> str:
+    """Bundle every computed analysis product into one ZIP.
+
+    Writes profiles as CSVs, stats as JSON + LaTeX, the phase histogram
+    as FITS, sightline columns as CSV, plus a README describing each
+    file and the provenance metadata. Returns the ZIP path.
+    """
+    import json
+    import zipfile
+
+    ts = int(time.time())
+    zpath = os.path.join(output_dir, f"vizmo_analysis_{ts}.zip")
+    os.makedirs(output_dir, exist_ok=True)
+    readme = ["vizmo analysis bundle", "=" * 30, ""]
+    if metadata:
+        for k, v in metadata.items():
+            readme.append(f"{k}: {v}")
+        readme.append("")
+
+    with zipfile.ZipFile(zpath, "w", zipfile.ZIP_DEFLATED) as z:
+        if profiles:
+            from .analysis import profile_to_csv
+            import tempfile
+
+            for name, (r, prof, fld, unit) in profiles.items():
+                tmp = tempfile.NamedTemporaryFile(
+                    "w", suffix=".csv", delete=False)
+                tmp.close()
+                profile_to_csv(tmp.name, r, prof, fld, unit)
+                z.write(tmp.name, f"profiles/{name}.csv")
+                os.unlink(tmp.name)
+                readme.append(f"profiles/{name}.csv — radial profile")
+        if stats_rows:
+            payload = {"region_stats": dict(stats_rows),
+                       "halo_properties": dict(halo_rows or []),
+                       "metadata": metadata or {}}
+            z.writestr("stats.json", json.dumps(payload, indent=1))
+            readme.append("stats.json — region statistics + metadata")
+            import tempfile
+
+            tmp = tempfile.NamedTemporaryFile("w", suffix=".tex",
+                                              delete=False)
+            tmp.close()
+            export_latex_table(
+                list(stats_rows) + list(halo_rows or []), tmp.name)
+            z.write(tmp.name, "stats_table.tex")
+            os.unlink(tmp.name)
+            readme.append("stats_table.tex — LaTeX tabular block")
+        if phase is not None:
+            import io
+
+            from astropy.io import fits as pyfits
+
+            buf = io.BytesIO()
+            hdu = pyfits.PrimaryHDU(phase["H"].T.astype(np.float32))
+            hdu.header["XFIELD"] = phase["xfield"]
+            hdu.header["YFIELD"] = phase["yfield"]
+            hdu.header["WEIGHT"] = phase.get("weighting", "mass")
+            hdu.writeto(buf)
+            z.writestr("phase_diagram.fits", buf.getvalue())
+            readme.append("phase_diagram.fits — 2D phase histogram")
+        if sightlines:
+            import tempfile
+
+            from .spectro import sightlines_to_csv
+
+            tmp = tempfile.NamedTemporaryFile("w", suffix=".csv",
+                                              delete=False)
+            tmp.close()
+            sightlines_to_csv(tmp.name, sightlines)
+            z.write(tmp.name, "sightlines/columns.csv")
+            os.unlink(tmp.name)
+            readme.append("sightlines/columns.csv — LOS column densities")
+        z.writestr("README.txt", "\n".join(readme) + "\n")
+    return zpath

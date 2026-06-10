@@ -925,27 +925,30 @@ def _hsml_field_names():
     return ("SmoothingLength", "KernelMaxRadius", "Hsml", "StellarHsml", "SubfindHsml")
 
 
-def _hsml_disk_cache_path(snapshot_path, p, n):
-    """Cache file for computed kernel radii, keyed by snapshot identity.
-
-    Keyed on absolute path + file size + mtime + ptype + particle count,
-    so a re-written snapshot never reuses stale radii. Lives under
-    ~/.cache/vizmo (not next to the data — snapshot dirs are often
-    read-only or synced).
-    """
+def _snapshot_content_key(snapshot_path):
+    """Content-derived cache key: SHA-256 of the first 64 KiB plus the
+    file size, so the hsml cache survives file moves/renames but
+    invalidates on rewrites (Phase 8.C)."""
     import hashlib
 
-    ap = os.path.abspath(snapshot_path)
     try:
-        st = os.stat(ap)
-        sig = f"{ap}|{st.st_size}|{int(st.st_mtime)}|{p}|{n}"
+        st = os.stat(snapshot_path)
+        with open(snapshot_path, "rb") as f:
+            head = f.read(65536)
+        return (hashlib.sha256(head).hexdigest()[:16]
+                + f"-{st.st_size:x}")
     except OSError:
-        sig = f"{ap}|{p}|{n}"
-    digest = hashlib.sha1(sig.encode()).hexdigest()[:20]
-    cache_dir = os.path.join(
-        os.environ.get("XDG_CACHE_HOME", os.path.expanduser("~/.cache")), "vizmo", "hsml"
-    )
-    return os.path.join(cache_dir, f"{digest}.npy")
+        import hashlib as _h
+
+        return _h.sha1(os.path.abspath(snapshot_path).encode()).hexdigest()[:16]
+
+
+def _hsml_disk_cache_path(snapshot_path, p, n):
+    base = os.environ.get(
+        "XDG_CACHE_HOME", os.path.expanduser("~/.cache"))
+    d = os.path.join(base, "vizmo", "hsml")
+    key = _snapshot_content_key(snapshot_path)
+    return os.path.join(d, f"{key}_pt{p}_n{n}.npy")
 
 
 def _hsml_disk_cache_load(snapshot_path, p, n):
@@ -1624,6 +1627,13 @@ class SnapshotData:
         raw = self.available_fields()
         vec = self.available_vector_fields()
         return raw + [f for f in available_derived_fields(raw, vec) if f not in raw]
+
+    @property
+    def kdtree(self):
+        """cKDTree over positions (built lazily on first access)."""
+        from .analysis import ensure_kdtree
+
+        return ensure_kdtree(self)
 
     def get_view_center(self):
         """Current view center in code units (for derived fields)."""

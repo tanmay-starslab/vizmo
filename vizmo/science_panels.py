@@ -1243,6 +1243,7 @@ class AnalysisDrawer(Panel):
             bx = fbtn(bx, "Rx2", "r_double")
             bx = fbtn(bx, "Halo", "stats_halo", active=self._show_halo)
             bx = fbtn(bx, "JSON", "stats_json")
+            bx = fbtn(bx, "TeX", "stats_latex")
 
         self._panel_w, self._panel_h = tw, th
         self._panel_x, self._panel_y = self._panel_origin(tw, th)

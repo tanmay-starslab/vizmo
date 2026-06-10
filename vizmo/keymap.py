@@ -19,6 +19,7 @@ KEYBINDINGS = [
     ("P", "Save screenshot"),
     ("Ctrl+P", "Publication figure (colorbar + scale bar burned in)"),
     ("Ctrl+E", "Export sphere around center to HDF5 cutout"),
+    ("Ctrl+Shift+E", "Export all analysis products as one ZIP"),
     ("Ctrl+M", "Export kernel-projected FITS map (aperture/center)"),
     ("F", "Toggle field filters (range cuts on any field)"),
     ("V", "Start / stop frame recording (movie export)"),
