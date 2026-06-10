@@ -509,6 +509,8 @@ def run_wgpu_app(
                 drawer.toggle("inspector")
             elif key == glfw.KEY_F:
                 drawer.toggle("filters")
+            elif key == glfw.KEY_M and (mods & glfw.MOD_CONTROL):
+                _export_fits_map()
             elif key == glfw.KEY_M:
                 if mods & glfw.MOD_SHIFT:
                     # Shift+M: drop the aperture, back to global scope.
@@ -882,6 +884,8 @@ def run_wgpu_app(
                         toasts.show("Orbiting view center", "ok")
                 elif tb_action == "export_region":
                     _export_region_cutout()
+                elif tb_action == "fits_map":
+                    _export_fits_map()
                 elif tb_action == "help":
                     help_panel.enabled = not help_panel.enabled
                 return
@@ -1241,6 +1245,39 @@ def run_wgpu_app(
             toasts.show(f"Cutout saved: {n:,} particles", "ok")
         except Exception as e:
             toasts.show(f"Cutout export failed: {e}", "error")
+
+    def _export_fits_map():
+        """Kernel-projected FITS map of the active field over the
+        aperture (or a default sphere about the view center), along
+        the camera's dominant axis."""
+        import os
+
+        try:
+            from .export import export_fits_map
+
+            if _aperture["active"]:
+                center = _aperture["center"]
+                radius_kpc = _aperture["radius"] * units.length_to_kpc
+            else:
+                center = data.get_view_center()
+                radius_kpc = None
+            fwd = camera.forward
+            axis = "xyz"[int(np.argmax(np.abs(fwd)))]
+            field = (
+                _state["_wa_data_field"]
+                if _state["_render_mode_name"] in ("WeightedAverage", "WeightedVariance")
+                else _state["_sd_field"]
+            )
+            out = os.path.join(screenshot_dir or ".",
+                               f"vizmo_map_{field}_{int(time.time())}.fits")
+            toasts.show(f"Computing {field} map...", "info")
+            fpath, ppath = export_fits_map(
+                data, field=field, center=center,
+                radius_kpc=radius_kpc, path=out, axis=axis)
+            print(f"  FITS map: {fpath}")
+            toasts.show(f"FITS map saved: {os.path.basename(fpath)}", "ok")
+        except Exception as e:
+            toasts.show(f"FITS export failed: {e}", "error")
 
     def _handle_filter_action(action):
         """Mutate data.filters from a drawer action and re-render.

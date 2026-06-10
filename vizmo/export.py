@@ -144,6 +144,125 @@ def annotate_screenshot(
 
 
 # ---------------------------------------------------------------------------
+# FITS map export (meshoid kernel-weighted projection)
+# ---------------------------------------------------------------------------
+
+def export_fits_map(data, field="Masses", center=None, radius_kpc=None,
+                    npix=512, path=None, axis="z"):
+    """Project a spherical region onto an axis-aligned grid and write a
+    FITS image (+ PNG quicklook).
+
+    Uses meshoid's kernel-weighted GridSurfaceDensity, so the map is a
+    proper SPH/MFM projection rather than a 2D histogram:
+
+      field == "Masses": surface density Sigma in Msun/kpc^2
+      otherwise:         mass-weighted projection of `field`
+                         (Sigma_{m*f} / Sigma_m) in the field's units
+
+    `axis` ("x" | "y" | "z") is the line-of-sight axis. Returns
+    (fits_path, png_path).
+    """
+    from astropy.io import fits as pyfits
+    from meshoid.grid_deposition import GridSurfaceDensity
+
+    from .physics import UnitSystem, field_unit_label
+
+    units = UnitSystem(data.header)
+    if center is None:
+        center = data.get_view_center()
+    center = np.asarray(center, dtype=np.float64)
+    r_all = np.linalg.norm(data.positions - center[None, :], axis=1)
+    if radius_kpc is None:
+        radius_kpc = float(np.percentile(r_all, 25.0)) * units.length_to_kpc
+    r_code = radius_kpc / max(units.length_to_kpc, 1e-30)
+
+    keep = r_all <= r_code
+    if keep.sum() < 8:
+        raise ValueError("Fewer than 8 particles inside the aperture")
+    # Permute coordinates so the LOS is the last axis.
+    order = {"x": (1, 2, 0), "y": (2, 0, 1), "z": (0, 1, 2)}[axis]
+    pos = np.ascontiguousarray(
+        data.positions[keep][:, order], dtype=np.float64)
+    ctr = center[list(order)]
+    h = np.ascontiguousarray(data.hsml[keep], dtype=np.float64)
+    m = data.masses[keep].astype(np.float64)
+
+    size = 2.0 * r_code
+    sigma_m = GridSurfaceDensity(m, pos, h, ctr, size, res=npix)
+    if field in (None, "Masses"):
+        # code mass / code length^2 -> Msun / kpc^2
+        img = (sigma_m * units.mass_to_msun / units.length_to_kpc**2)
+        bunit = "Msun/kpc^2"
+        fname = "SurfaceDensity"
+    else:
+        vals = np.asarray(data.get_field(field), dtype=np.float64)[keep]
+        sigma_mf = GridSurfaceDensity(m * vals, pos, h, ctr, size, res=npix)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            img = np.where(sigma_m > 0, sigma_mf / sigma_m, np.nan)
+        bunit = field_unit_label(field) or "code units"
+        fname = field
+
+    if path is None:
+        path = f"vizmo_map_{fname}_{int(time.time())}.fits"
+    dkpc = 2.0 * radius_kpc / npix
+
+    hdu = pyfits.PrimaryHDU(img.T.astype(np.float32))
+    hd = hdu.header
+    hd["BUNIT"] = bunit
+    hd["FIELD"] = fname
+    hd["CTYPE1"] = "LINEAR"
+    hd["CTYPE2"] = "LINEAR"
+    hd["CUNIT1"] = "kpc"
+    hd["CUNIT2"] = "kpc"
+    hd["CRPIX1"] = npix / 2 + 0.5
+    hd["CRPIX2"] = npix / 2 + 0.5
+    hd["CRVAL1"] = 0.0
+    hd["CRVAL2"] = 0.0
+    hd["CDELT1"] = dkpc
+    hd["CDELT2"] = dkpc
+    hd["LOSAXIS"] = axis
+    hd["RADKPC"] = radius_kpc
+    hd["CENX"] = center[0]
+    hd["CENY"] = center[1]
+    hd["CENZ"] = center[2]
+    hd["REDSHIFT"] = float(getattr(units, "redshift", 0.0))
+    hd["ORIGIN"] = "vizmo export_fits_map (meshoid GridSurfaceDensity)"
+    hd["SRCFILE"] = os.path.basename(getattr(data, "path", ""))
+    hdu.writeto(path, overwrite=True)
+
+    # PNG quicklook
+    png_path = os.path.splitext(path)[0] + ".png"
+    try:
+        from matplotlib.figure import Figure
+        from matplotlib.colors import LogNorm
+        from matplotlib.backends.backend_agg import FigureCanvasAgg
+
+        fig = Figure(figsize=(6.4, 5.6), dpi=120)
+        ax = fig.add_subplot(111)
+        finite = np.isfinite(img)
+        pos_ok = finite & (img > 0)
+        if pos_ok.sum() > 0.5 * finite.sum():
+            vmin = np.percentile(img[pos_ok], 1)
+            vmax = np.percentile(img[pos_ok], 99.9)
+            norm = LogNorm(vmin=max(vmin, vmax * 1e-8), vmax=vmax)
+        else:
+            norm = None
+        ext = [-radius_kpc, radius_kpc, -radius_kpc, radius_kpc]
+        im = ax.imshow(img.T, origin="lower", extent=ext, cmap="magma",
+                       norm=norm, interpolation="nearest")
+        cb = fig.colorbar(im, ax=ax, pad=0.02)
+        cb.set_label(f"{fname} [{bunit}]")
+        ax.set_xlabel("kpc")
+        ax.set_ylabel("kpc")
+        ax.set_title(f"LOS={axis}  R={radius_kpc:.0f} kpc")
+        fig.tight_layout()
+        FigureCanvasAgg(fig).print_png(png_path)
+    except Exception:
+        png_path = None
+    return os.path.abspath(path), png_path
+
+
+# ---------------------------------------------------------------------------
 # Region export
 # ---------------------------------------------------------------------------
 

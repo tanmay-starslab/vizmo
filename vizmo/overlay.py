@@ -1007,6 +1007,7 @@ class ToolbarOverlay(Panel):
                 ("Aperture", "aperture", aperture),
                 ("Orbit", "orbit", orbiting),
                 ("Cutout", "export_region"),
+                ("FITS", "fits_map"),
             ]),
         ])
 

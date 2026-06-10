@@ -55,7 +55,7 @@ def test_toolbar_hit_testing():
     assert keys == [
         "auto_range", "screenshot", "publication", "record", "help",
         "inspector", "phase", "profile", "stats", "filters", "aperture",
-        "orbit", "export_region",
+        "orbit", "export_region", "fits_map",
     ]
     # Click dead-center of each button and check the action comes back.
     for w in tb._widgets:

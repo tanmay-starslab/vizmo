@@ -129,13 +129,38 @@ Color a TNG halo by temperature in two clicks.
 center, redshift, active field + units, particle counts), and an
 orientation triad showing the simulation axes.
 
+**Analysis aperture** (`M`, or toolbar **Aperture**): draw a sphere in
+the scene — click drops the center on the particle under the cursor,
+scroll resizes, `M` submits, `Shift+M` clears. On submit the center is
+refined inside the sphere by your choice of densest particle,
+potential minimum, Power+03 shrinking sphere, or center of mass
+(cycled from the drawer). Phase diagrams, profiles, and statistics
+then compute inside the aperture (per-tool Aperture/Global toggle),
+and Orbit / go-to-center / axis views pivot about it. Profiles include
+shell density, enclosed mass, rotation curve v_c = sqrt(GM(<r)/r), and
+3D velocity dispersion.
+
+**Field filters** (`F`, or toolbar **Filters**): Firefly-style range
+cuts on any raw or derived field — e.g. show only gas with
+T < 3x10^4 K, or only inflowing material (RadialVelocity < 0).
+Filters stack, work in every render mode, and nudge their bounds in
+percentile steps so they behave on fields spanning 8 decades. Also
+available headlessly: `--filter Temperature:0:3e4` (repeatable).
+
 **Exports:**
 - `Ctrl+P` / toolbar **Figure** — publication-ready PNG with colorbar,
   ticks, units, scale bar, and metadata caption burned in.
 - `Ctrl+E` / toolbar **Cutout** — write the sphere around the view
   center to a standalone Gadget-style HDF5 (round-trips through vizmo
   and standard tools; `.csv` also supported).
+- `Ctrl+M` / toolbar **FITS** — kernel-weighted projected map
+  (meshoid GridSurfaceDensity) of the active field over the aperture,
+  written as FITS with linear-kpc WCS + PNG quicklook. Surface density
+  in Msun/kpc^2; other fields as mass-weighted projections.
 - `V` — frame recording for movies (pairs well with Orbit).
+
+CMasher perceptually-uniform colormaps (cmr.rainforest, cmr.ember,
+cmr.cosmic, ...) join the matplotlib set in the colormap cycle.
 
 ## Controls
 
@@ -166,8 +191,10 @@ Help and Inspect / Phase / Profile / Stats / Orbit / Cutout.
 - `+/-` — Contract/expand color range
 - `,/.` — Lower/raise the auto-LOD subsample-cap ceiling
 - `Shift+Click` — Pick particle (opens inspector)
-- `I` / `G` / `J` / `U` — Inspector / Phase diagram / Radial profile /
-  Region stats
+- `I` / `G` / `J` / `U` / `F` — Inspector / Phase diagram / Radial
+  profile / Region stats / Field filters
+- `M` / `Shift+M` — Place analysis aperture / clear it
+- `Ctrl+M` — Export FITS map
 - `F9` — Science chrome (scale bar, status bar, axes triad)
 - `P` — Save screenshot; `Ctrl+P` — publication figure
 - `Ctrl+E` — Export region cutout (HDF5)

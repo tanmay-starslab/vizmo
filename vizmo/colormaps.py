@@ -15,6 +15,25 @@ AVAILABLE_COLORMAPS = [
     "cividis",
 ]
 
+# CMasher perceptually-uniform scientific colormaps (van der Velden
+# 2020) — registered with matplotlib on import, so they work in
+# colormap_to_texture_data and everywhere else by name.
+try:
+    import cmasher  # noqa: F401
+
+    AVAILABLE_COLORMAPS += [
+        "cmr.rainforest",
+        "cmr.ember",
+        "cmr.cosmic",
+        "cmr.arctic",
+        "cmr.dusk",
+        "cmr.eclipse",
+        "cmr.freeze",
+        "cmr.sunburst",
+    ]
+except ImportError:
+    pass
+
 
 def colormap_to_texture_data(name, n=256):
     """Convert a matplotlib colormap to an RGBA uint8 array of shape (n, 4)."""

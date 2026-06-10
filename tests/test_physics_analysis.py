@@ -308,3 +308,182 @@ def test_manual_input_cancels_autopilot():
     c.on_key(glfw.KEY_W, glfw.PRESS)
     c.update(0.05)
     assert not c.in_transit
+
+
+# ---------------------------------------------------------------------------
+# Aperture analysis (region centering, special profiles, scoping)
+# ---------------------------------------------------------------------------
+
+def test_shrinking_sphere_center_finds_clump(cosmo_data):
+    from vizmo.analysis import shrinking_sphere_center
+
+    # True center of the uniform sphere is (50,50,50); start offset.
+    c = shrinking_sphere_center(
+        cosmo_data.positions, cosmo_data.masses,
+        center=np.array([53.0, 48.0, 51.0]), radius=15.0)
+    assert np.linalg.norm(c - 50.0) < 1.5
+
+
+def test_find_center_in_region_modes(cosmo_data):
+    from vizmo.analysis import find_center_in_region, CENTER_MODES
+
+    for mode in CENTER_MODES:
+        c = find_center_in_region(
+            cosmo_data, np.array([50.0, 50.0, 50.0]), 12.0, mode)
+        assert np.all(np.isfinite(c))
+        assert np.linalg.norm(c - 50.0) < 11.0
+
+
+def test_rotation_curve_keplerian(tmp_path, cache_isolation):
+    """All mass in a tiny core -> v_c(r) ~ sqrt(GM/r) outside it."""
+    import h5py as _h5
+    from vizmo.data_manager import SnapshotData
+    from vizmo.analysis import radial_profile, G_KPC_KMS2_MSUN
+    from vizmo.physics import UnitSystem
+
+    path = str(tmp_path / "kepler.hdf5")
+    rng = np.random.default_rng(3)
+    n_core, n_test = 5000, 2000
+    core = 50.0 + 0.05 * rng.standard_normal((n_core, 3))
+    u = rng.random(n_test)
+    r = 1.0 + 9.0 * u
+    v = rng.standard_normal((n_test, 3))
+    v /= np.linalg.norm(v, axis=1)[:, None]
+    outer = 50.0 + r[:, None] * v
+    pos = np.vstack([core, outer])
+    m = np.concatenate([np.full(n_core, 1.0e-3), np.full(n_test, 1e-12)])
+    with _h5.File(path, "w") as f:
+        h = f.create_group("Header")
+        h.attrs["BoxSize"] = 100.0
+        h.attrs["MassTable"] = np.zeros(6)
+        h.attrs["NumPart_ThisFile"] = np.array([len(m), 0, 0, 0, 0, 0])
+        h.attrs["Time"] = 1.0
+        h.attrs["HubbleParam"] = 1.0
+        h.attrs["UnitLength_in_cm"] = 3.085678e21
+        h.attrs["UnitMass_in_g"] = 1.989e43
+        h.attrs["UnitVelocity_in_cm_per_s"] = 1e5
+        g = f.create_group("PartType0")
+        g["Coordinates"] = pos
+        g["Masses"] = m.astype(np.float32)
+        g["SmoothingLength"] = np.full(len(m), 0.5, dtype=np.float32)
+    d = SnapshotData(path, particle_types=[0])
+    d.set_view_center(np.array([50.0, 50.0, 50.0]))
+    units = UnitSystem(d.header)
+    rr, vc, unit = radial_profile(d, "RotationCurve", r_min_kpc=1.0,
+                                  r_max_kpc=9.0, n_bins=12)
+    assert unit == "km/s"
+    M = n_core * 1.0e-3 * units.mass_to_msun
+    expected = np.sqrt(G_KPC_KMS2_MSUN * M / rr)
+    ok = np.isfinite(vc)
+    assert np.allclose(vc[ok], expected[ok], rtol=0.05)
+    d.close()
+
+
+def test_velocity_dispersion_pure_radial(cosmo_data):
+    from vizmo.analysis import radial_profile
+
+    # Pure 100 km/s radial outflow: shell-mean velocity vector ~ 0, so
+    # the 3D dispersion about the mean is ~100 km/s.
+    r, sig, unit = radial_profile(cosmo_data, "VelocityDispersion3D",
+                                  n_bins=8)
+    ok = np.isfinite(sig)
+    assert unit == "km/s"
+    assert np.allclose(sig[ok][2:], 100.0, rtol=0.15)
+
+
+def test_phase_histogram_aperture_scoping(cosmo_data):
+    from vizmo.analysis import phase_histogram, region_stats
+    from vizmo.physics import UnitSystem
+
+    units = UnitSystem(cosmo_data.header)
+    r_kpc = 5.0 * units.length_to_kpc
+    ph = phase_histogram(cosmo_data, "NumberDensity", "Temperature",
+                         center=np.array([50.0, 50.0, 50.0]),
+                         radius_kpc=r_kpc)
+    rows, _ = region_stats(cosmo_data, center=np.array([50.0, 50.0, 50.0]),
+                           radius_kpc=r_kpc)
+    total = float(dict(rows)["Total mass"].split()[0])
+    assert ph["H"].sum() == pytest.approx(total, rel=2e-2)
+
+
+# ---------------------------------------------------------------------------
+# Field filters
+# ---------------------------------------------------------------------------
+
+def test_filter_mask_basic(cosmo_data):
+    t0 = float(cosmo_data.get_field("Temperature")[0])
+    cosmo_data.set_filters([
+        {"field": "Temperature", "lo": t0 * 0.5, "hi": t0 * 2.0}])
+    assert cosmo_data.filter_mask().min() == 1.0  # single-T snapshot
+    cosmo_data.set_filters([
+        {"field": "Temperature", "lo": t0 * 2.0, "hi": t0 * 4.0}])
+    assert cosmo_data.filter_mask().max() == 0.0
+    cosmo_data.set_filters([])
+    assert cosmo_data.filter_mask().min() == 1.0
+
+
+def test_filter_on_derived_radius(cosmo_data):
+    from vizmo.physics import UnitSystem
+
+    units = UnitSystem(cosmo_data.header)
+    r5 = 5.0 * units.length_to_kpc
+    cosmo_data.set_filters([
+        {"field": "RadiusFromCenter", "lo": 0.0, "hi": r5}])
+    m = cosmo_data.filter_mask()
+    r = cosmo_data.get_field("RadiusFromCenter")
+    assert abs(m.sum() - (r <= r5).sum()) <= 1
+    # Moving the center invalidates radius-dependent filter masks.
+    cosmo_data.set_view_center(np.array([0.0, 0.0, 0.0]))
+    m2 = cosmo_data.filter_mask()
+    assert m2.sum() < m.sum()
+    cosmo_data.set_view_center(np.array([50.0, 50.0, 50.0]))
+    cosmo_data.set_filters([])
+
+
+# ---------------------------------------------------------------------------
+# FITS map export
+# ---------------------------------------------------------------------------
+
+def test_export_fits_map_mass_conservation(cosmo_data, tmp_path):
+    from astropy.io import fits as pyfits
+    from vizmo.export import export_fits_map
+    from vizmo.physics import UnitSystem
+
+    units = UnitSystem(cosmo_data.header)
+    r_kpc = 12.0 * units.length_to_kpc  # whole 10-unit sphere inside
+    fpath, ppath = export_fits_map(
+        cosmo_data, field="Masses", radius_kpc=r_kpc,
+        path=str(tmp_path / "map.fits"), npix=128)
+    hdu = pyfits.open(fpath)[0]
+    pix_area = hdu.header["CDELT1"] * hdu.header["CDELT2"]
+    total = np.nansum(hdu.data) * pix_area
+    expected = (cosmo_data.masses.astype(np.float64).sum()
+                * units.mass_to_msun)
+    assert total == pytest.approx(expected, rel=5e-2)
+    assert hdu.header["BUNIT"] == "Msun/kpc^2"
+
+
+def test_export_fits_map_weighted_field(cosmo_data, tmp_path):
+    from astropy.io import fits as pyfits
+    from vizmo.export import export_fits_map
+    from vizmo.physics import UnitSystem
+
+    units = UnitSystem(cosmo_data.header)
+    fpath, _ = export_fits_map(
+        cosmo_data, field="Temperature",
+        radius_kpc=12.0 * units.length_to_kpc,
+        path=str(tmp_path / "tmap.fits"), npix=64)
+    img = pyfits.open(fpath)[0].data
+    t_expected = float(cosmo_data.get_field("Temperature")[0])
+    finite = np.isfinite(img)
+    # Mass-weighted projection of a single-valued field returns it.
+    assert np.allclose(img[finite], t_expected, rtol=1e-3)
+
+
+def test_cmasher_colormaps_available():
+    from vizmo.colormaps import AVAILABLE_COLORMAPS, colormap_to_texture_data
+
+    cmr = [c for c in AVAILABLE_COLORMAPS if c.startswith("cmr.")]
+    assert len(cmr) >= 4
+    tex = colormap_to_texture_data(cmr[0])
+    assert tex.shape == (256, 4) and tex.dtype == np.uint8
