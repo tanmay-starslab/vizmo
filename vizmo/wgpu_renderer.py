@@ -3344,9 +3344,9 @@ class VolumeRenderer:
                              | wgpu.BufferUsage.COPY_DST))
         self._sampler = device.create_sampler(
             mag_filter="linear", min_filter="linear",
-            address_mode_x="clamp-to-edge",
-            address_mode_y="clamp-to-edge",
-            address_mode_z="clamp-to-edge")
+            address_mode_u="clamp-to-edge",
+            address_mode_v="clamp-to-edge",
+            address_mode_w="clamp-to-edge")
         self._bg = None
         self._vox_pipeline = None
         self._vox_bgl = None
