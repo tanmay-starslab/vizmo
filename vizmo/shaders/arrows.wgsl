@@ -46,9 +46,9 @@ fn vs_main(@builtin(vertex_index) vi: u32,
     }
     let dir = ivec / len;
     // Orthonormal frame around dir.
-    var ref = vec3<f32>(0.0, 0.0, 1.0);
-    if (abs(dir.z) > 0.9) { ref = vec3<f32>(0.0, 1.0, 0.0); }
-    let e1 = normalize(cross(ref, dir));
+    var up_ref = vec3<f32>(0.0, 0.0, 1.0);
+    if (abs(dir.z) > 0.9) { up_ref = vec3<f32>(0.0, 1.0, 0.0); }
+    let e1 = normalize(cross(up_ref, dir));
     let e2 = cross(dir, e1);
 
     // Template vertex in (radial spoke s, radial scale r, axial z).
