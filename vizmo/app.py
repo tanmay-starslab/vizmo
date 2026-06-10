@@ -62,6 +62,24 @@ def main():
         help="Directory for P-key screenshots and frame recordings (default: cwd)",
     )
     parser.add_argument(
+        "--field",
+        type=str,
+        default=None,
+        metavar="NAME",
+        help="Starting field: raw (Masses, Density, ...) or derived "
+        "(Temperature, NumberDensity, RadialVelocity, ...). With "
+        "--mode SurfaceDensity it is the weight; with WeightedAverage/"
+        "WeightedVariance it is the data field (mass-weighted).",
+    )
+    parser.add_argument(
+        "--mode",
+        type=str,
+        default=None,
+        choices=["SurfaceDensity", "WeightedAverage", "WeightedVariance"],
+        help="Starting render mode (default SurfaceDensity; "
+        "WeightedAverage is implied when --field is a non-mass field)",
+    )
+    parser.add_argument(
         "--profile",
         type=str,
         default=None,
@@ -103,6 +121,8 @@ def main():
                 radius=args.radius,
                 colormap=args.colormap,
                 screenshot_dir=args.screenshot_dir,
+                field=args.field,
+                mode=args.mode,
             )
         finally:
             pr.disable()
@@ -127,6 +147,8 @@ def main():
             radius=args.radius,
             colormap=args.colormap,
             screenshot_dir=args.screenshot_dir,
+            field=args.field,
+            mode=args.mode,
         )
 
 

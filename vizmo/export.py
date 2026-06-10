@@ -68,7 +68,7 @@ def annotate_screenshot(
             depth; scale bar is omitted when None.
         caption: free-form line drawn bottom-left above the scale bar.
     """
-    from matplotlib import cm as mpl_cm
+    import matplotlib
 
     img = Image.open(src_path).convert("RGBA")
     W, H = img.size
@@ -83,7 +83,7 @@ def annotate_screenshot(
     bx1 = W - int(W * 0.025)
     bx0 = bx1 - bar_w
     by0 = (H - bar_h) // 2
-    cmap = mpl_cm.get_cmap(cmap_name)
+    cmap = matplotlib.colormaps[cmap_name]
     for j in range(bar_h):
         t = 1.0 - j / max(bar_h - 1, 1)
         r, g, b, _ = cmap(t)

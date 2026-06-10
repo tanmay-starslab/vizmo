@@ -4,6 +4,13 @@
 
 Real-time 3D fly-through explorer for unstructured simulation data. Loads simulation snapshot data and renders interactive surface density maps, mass-weighted averages, velocity dispersions, and composite lightness x color maps on the GPU via WebGPU.
 
+Beyond rendering, vizmo is a quantitative explorer: it derives physical
+fields (temperature, n_H, pressure, entropy, radial velocity, |B|, Z/Zsun,
+stellar ages) from raw snapshot data with full cosmological unit handling,
+and puts interactive science tools in the window — particle inspection by
+clicking, phase diagrams, radial profiles, region statistics, a physical
+scale bar, publication-figure export, and HDF5 cutout export.
+
 Codes whose outputs have been successfully loaded to date:
 - GIZMO
 - AREPO
@@ -93,10 +100,48 @@ Getting this to work on 100M+ particle datasets has been tricky. Here is what ha
 - Multi-grid kernel splatting, implementing the algorithm of [meshoid](https://github.com/mikegrudic/meshoid) on the GPU, so that particles appearing large on the screen do not have to splat a huge number of pixels.
 - GPU-side brute-force frustum culling. Experimented extensively with tree-based algorithms, but at ~100M bruteforce works fine.
 
+## Science tools
+
+**Derived physical fields.** Every field menu (Weight / Field 2 / Data,
+all render modes) lists physically meaningful fields computed on demand
+from the raw snapshot with full cosmological (a, h) unit handling:
+`Temperature` (K, from internal energy + electron abundance),
+`NumberDensity` (n_H in cm^-3), `Pressure` (P/k_B in K cm^-3),
+`Entropy` (T/n^2/3), `SoundSpeed`, `VelocityMagnitude`,
+`RadialVelocity` (about the view center, positive = outflow),
+`RadiusFromCenter`, `MagneticFieldMagnitude` (uG),
+`MetallicityZsun`, and `StellarAge` (Gyr, flat-LCDM).
+Color a TNG halo by temperature in two clicks.
+
+**Analysis drawer** (right side, toolbar buttons or keys):
+- **Inspector** (`I`, or `Shift+Click` any particle) — physical
+  properties of the particle under the cursor: n_H, T, Z, v_r, SFR,
+  |v|, ID, distance to center; one click re-centers the view on it.
+- **Phase diagram** (`G`) — mass-weighted 2D histograms with preset
+  pairs (n_H–T, n_H–P, T–Z, r–T, r–v_r), auto log axes.
+- **Radial profile** (`J`) — shell density or mass-weighted profiles
+  (T, v_r, Z, P, |v|) about the view center.
+- **Region statistics** (`U`) — total/per-type mass, half-mass radius,
+  SFR, <T>, <Z>, <v_r> inside an adjustable sphere.
+
+**Science chrome** (`F9` toggles): physical scale bar (pc/kpc/Mpc,
+1-2-5 rounded), status bar (camera position in kpc, distance to
+center, redshift, active field + units, particle counts), and an
+orientation triad showing the simulation axes.
+
+**Exports:**
+- `Ctrl+P` / toolbar **Figure** — publication-ready PNG with colorbar,
+  ticks, units, scale bar, and metadata caption burned in.
+- `Ctrl+E` / toolbar **Cutout** — write the sphere around the view
+  center to a standalone Gadget-style HDF5 (round-trips through vizmo
+  and standard tools; `.csv` also supported).
+- `V` — frame recording for movies (pairs well with Orbit).
+
 ## Controls
 
 Press `F1` or `H` in-app for this list. The top-left toolbar gives
-one-click Auto-range / Screenshot / Rec / Help.
+one-click access to all of it: Auto-range / Screenshot / Figure / Rec /
+Help and Inspect / Phase / Profile / Stats / Orbit / Cutout.
 
 **Camera:**
 - `W/A/S/D` — Move forward/left/back/right
@@ -105,10 +150,14 @@ one-click Auto-range / Screenshot / Rec / Help.
 - Mouse (click + drag) — Look around
 - Scroll wheel — Adjust flight speed
 - `Ctrl`+Scroll or `[/]` — Optical zoom (FOV 10–140°)
-- `1-9` — Jump to camera bookmark; `Shift+1-9` — save bookmark
+- `1-9` — Fly to camera bookmark (eased); `Shift+1-9` — save bookmark
   (persisted per snapshot under `~/.config/vizmo`)
+- `N` / `Shift+N` — Look at the view center / fly toward it
+- `Y` / `Shift+Y` — Orbit the view center (reverse with Shift); any
+  manual input disengages
+- `F2/F3/F4` — Snap to +X/+Y/+Z axis views (`Shift` for negative)
 
-**Visualization:**
+**Visualization & analysis:**
 - `Tab` — Hide/show all UI
 - `C` — Cycle colormap
 - `L` — Toggle log/linear scale
@@ -116,12 +165,17 @@ one-click Auto-range / Screenshot / Rec / Help.
 - `T` — Auto-range composite Lightness slot
 - `+/-` — Contract/expand color range
 - `,/.` — Lower/raise the auto-LOD subsample-cap ceiling
-- `P` — Save screenshot
+- `Shift+Click` — Pick particle (opens inspector)
+- `I` / `G` / `J` / `U` — Inspector / Phase diagram / Radial profile /
+  Region stats
+- `F9` — Science chrome (scale bar, status bar, axes triad)
+- `P` — Save screenshot; `Ctrl+P` — publication figure
+- `Ctrl+E` — Export region cutout (HDF5)
 - `V` — Start/stop frame recording (PNG sequence + ffmpeg hint)
 - `F1` or `H` — Help panel
 - `\` — Toggle dev overlay
 - `K` — Toggle sink/star panel
-- `Esc` — Close help, then quit
+- `Esc` — Close panel/drawer, then quit
 
 Colormap, mouse inversion, and target FPS persist across sessions in
 `~/.config/vizmo/config.json`.
@@ -151,9 +205,16 @@ vizmo/
   wgpu_app.py       - Main loop, key actions, progressive refinement, auto-LOD
   wgpu_renderer.py  - WGPURenderer: RenderMode, accumulate + resolve + composite passes
   gpu_compute.py    - GPUCompute: GPU-resident data, compute cull/LOD/gather
-  wgpu_overlay.py   - WGPUDevOverlay, WGPUUserMenu (wgpu panel rendering)
-  overlay.py        - Panel/PanelStyle base, DevOverlay, UserMenu
-  camera.py         - 6DOF camera with cached basis vectors
+  wgpu_overlay.py   - wgpu panel rendering (all overlays)
+  overlay.py        - Panel/PanelStyle base, DevOverlay, UserMenu, Toolbar, Help
+  science_panels.py - Scale bar, status bar, toasts, axes gizmo, analysis drawer
+  physics.py        - UnitSystem (code->physical) + derived-field registry
+  analysis.py       - Ray picking, radial profiles, phase histograms, region stats
+  export.py         - Publication-figure annotation, HDF5/CSV region cutouts
+  framing.py        - View centering (densest/potential/com/median) + camera framing
+  session.py        - Bookmarks, settings persistence, eased pose restore
+  keymap.py         - Canonical keybinding list (help panel + README)
+  camera.py         - 6DOF camera, eased fly-to transitions, orbit autopilot
   data_manager.py   - HDF5 I/O with lazy loading and cosmological corrections
   field_ops.py      - Field arithmetic and vector projections
   colormaps.py      - Matplotlib colormap to GPU texture

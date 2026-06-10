@@ -39,6 +39,8 @@ def run_wgpu_app(
     radius=None,
     colormap=None,
     screenshot_dir=None,
+    field=None,
+    mode=None,
 ):
     """Run the vizmo application with the wgpu backend.
 
@@ -257,6 +259,24 @@ def run_wgpu_app(
     _vector_projection = _s["vector_projection"]
     _composite = _s["composite"]
     _slot = _s["slot"]
+
+    # --field / --mode CLI startup view. A non-mass field implies a
+    # mass-weighted average unless the user pinned the mode explicitly.
+    if field is not None:
+        if field not in _sd_fields:
+            print(f"  Unknown field {field!r}; available: {', '.join(_sd_fields)}")
+            field = None
+    if field is not None or mode is not None:
+        eff_mode = mode or (
+            "WeightedAverage" if field not in (None, "Masses") else "SurfaceDensity"
+        )
+        _render_mode_name = eff_mode
+        if eff_mode in ("WeightedAverage", "WeightedVariance"):
+            _wa_data_field = field or _wa_data_field
+        else:
+            _sd_field = field or _sd_field
+        print(f"  Startup view: {eff_mode}({field or _sd_field})")
+    _startup_view_pending = field is not None or mode is not None
 
     # Stars
     if no_stars:
@@ -1189,6 +1209,14 @@ def run_wgpu_app(
                 # doesn't early-out before the user has moved.
                 renderer.n_particles = min(renderer.n_total, renderer._subsample_max_per_frame)
                 print("  GPU subsample pipeline initialized")
+                # Apply the --field/--mode startup view now that the
+                # subsample buffers exist to receive its weights.
+                if _startup_view_pending:
+                    _startup_view_pending = False
+                    try:
+                        app_proxy._apply_render_mode(auto_range=False)
+                    except Exception as e:
+                        print(f"  Startup view failed: {e}")
                 # Defer the post-init auto-range a few frames so the
                 # GPU has actually rendered something into the FBO
                 # before we read it back. The pre-init auto-range that
