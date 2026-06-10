@@ -537,7 +537,10 @@ def run_wgpu_app(
             elif key == glfw.KEY_B:
                 renderer.cycle_star_band(-1 if (mods & glfw.MOD_SHIFT) else 1)
             elif key == glfw.KEY_O:
-                renderer.toggle_star_extinction()
+                if mods & glfw.MOD_SHIFT:
+                    renderer.toggle_star_extinction()
+                else:
+                    drawer.toggle("orbit")
             elif key == glfw.KEY_LEFT_BRACKET:
                 print(f"FOV: {camera.adjust_fov(-5.0):.0f}°")
             elif key == glfw.KEY_RIGHT_BRACKET:
@@ -872,8 +875,13 @@ def run_wgpu_app(
                     scale_bar._last_key = None
                     app_proxy._apply_render_mode(auto_range=False)
                     toasts.show("View center moved to picked particle", "ok")
+                elif dr_action == "orbit_compute":
+                    _compute_orbit(stream=False)
+                elif dr_action == "orbit_stream":
+                    _compute_orbit(stream=True)
                 elif dr_action in ("profile_csv", "phase_save",
-                                   "stats_json", "spectrum_csv"):
+                                   "stats_json", "spectrum_csv",
+                                   "orbit_csv"):
                     _handle_drawer_export(dr_action)
                 elif (isinstance(dr_action, tuple) and dr_action
                         and str(dr_action[0]).startswith("f_")):
@@ -1328,6 +1336,48 @@ def run_wgpu_app(
         except Exception as e:
             toasts.show(f"FITS export failed: {e}", "error")
 
+    def _compute_orbit(stream=False):
+        """Integrate the picked particle's orbit (or a mock stream) in
+        an NFW potential fit to the matter around the focus center."""
+        from . import orbit as orbmod
+
+        idx = drawer._picked_index
+        if idx is None:
+            toasts.show("Shift+click a particle first", "warn")
+            return
+        try:
+            center = _focus_center()
+            region = drawer._active_region()
+            toasts.show("Fitting potential + integrating...", "info")
+            phi = orbmod.build_potential_from_snapshot(
+                data.positions, data.masses, units,
+                method="nfw_fit", aperture_region=region, center=center)
+            kpc = units.length_to_kpc
+            p0 = (data.positions[idx] - center) * kpc
+            v_all = data.get_vector_field("Velocities")
+            v0 = np.asarray(v_all[idx], dtype=np.float64) * units.velocity_to_kms
+            if stream:
+                st = orbmod.generate_mock_stream(
+                    p0, v0, phi, m_satellite=1e9, n_tracers=60,
+                    t_end_gyr=2.0, n_steps=300)
+                o = st["satellite_orbit"]
+                props = orbmod.compute_orbital_properties(o, phi=phi)
+                n_strip = int(np.isfinite(st["stripping_time"]).sum())
+                toasts.show(
+                    f"Stream: r_J={st['r_jacobi']:.2f} kpc, "
+                    f"{n_strip}/60 tracers stripped", "ok")
+            else:
+                o = orbmod.integrate_orbit(p0, v0, phi, t_end_gyr=2.0)
+                props = orbmod.compute_orbital_properties(o, phi=phi)
+                toasts.show(
+                    f"Orbit: peri={props['r_peri']:.1f} apo="
+                    f"{props['r_apo']:.1f} kpc e={props['eccentricity']:.2f}",
+                    "ok")
+            drawer._last_orbit = (o, props)
+            drawer.refresh()
+        except Exception as e:
+            toasts.show(f"Orbit failed: {e}", "error")
+
     def _handle_drawer_export(action):
         """Write the drawer's last computed result to disk."""
         import os
@@ -1383,6 +1433,12 @@ def run_wgpu_app(
                 out = os.path.join(base, f"vizmo_stats_{ts}.json")
                 stats_to_json(out, rows, halo_rows, meta)
                 toasts.show(f"Stats saved: {os.path.basename(out)}", "ok")
+            elif action == "orbit_csv" and drawer._last_orbit is not None:
+                from .orbit import orbit_to_csv
+
+                out = os.path.join(base, f"vizmo_orbit_{ts}.csv")
+                orbit_to_csv(out, drawer._last_orbit[0])
+                toasts.show(f"Orbit saved: {os.path.basename(out)}", "ok")
             elif action == "spectrum_csv" and drawer._last_ps is not None:
                 from .power_spectrum import power_spectrum_to_csv
 

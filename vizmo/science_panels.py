@@ -543,6 +543,7 @@ class AnalysisDrawer(Panel):
         self._last_profile = None       # (r, prof_or_tracks, field, unit)
         self._last_phase = None         # phase dict
         self._last_ps = None            # power spectrum dict
+        self._last_orbit = None         # (orbit_result, props) from orbit.py
 
     # -- filters helpers -----------------------------------------------------
 
@@ -692,6 +693,15 @@ class AnalysisDrawer(Panel):
                         r, prof, unit, f, scale)
             return self._cache[key], f"{f}(r)"
 
+        if self.mode == "orbit":
+            if self._last_orbit is None:
+                return None, ""
+            key = ("orbit", id(self._last_orbit))
+            if key not in self._cache:
+                o, props = self._last_orbit
+                self._cache[key] = self._render_orbit(o, props, scale)
+            return self._cache[key], ""
+
         if self.mode == "spectrum":
             key = ("spectrum", data.n_particles, sc_key)
             if key not in self._cache:
@@ -788,6 +798,32 @@ class AnalysisDrawer(Panel):
         ax.set_ylabel(f"{field} [{unit}]" if unit else field, fontsize=10)
         _dark_axes(fig, ax)
         fig.tight_layout(pad=1.2)
+        return _fig_to_image(fig)
+
+    def _render_orbit(self, orbit_result, props, scale):
+        from matplotlib.figure import Figure
+
+        fig = Figure(figsize=(4.7 * scale, 5.2 * scale), dpi=100)
+        ax1 = fig.add_subplot(211)
+        ax2 = fig.add_subplot(212)
+        o = orbit_result
+        sc = ax1.scatter(o["pos"][:, 0], o["pos"][:, 1], c=o["t"], s=2,
+                         cmap="viridis")
+        ax1.scatter([o["pos"][0, 0]], [o["pos"][0, 1]], c="white", s=24,
+                    marker="o", zorder=5)
+        ax1.set_xlabel("x [kpc]", fontsize=9)
+        ax1.set_ylabel("y [kpc]", fontsize=9)
+        ax1.set_aspect("equal", adjustable="datalim")
+        cb = fig.colorbar(sc, ax=ax1, pad=0.02)
+        cb.set_label("t [Gyr]", color=(0.88, 0.9, 0.95), fontsize=8)
+        cb.ax.tick_params(colors=(0.82, 0.85, 0.9), labelsize=7)
+        ax2.plot(o["t"], o["r"], lw=1.8, color=(0.42, 0.72, 1.0))
+        ax2.set_xlabel("t [Gyr]", fontsize=9)
+        ax2.set_ylabel("r [kpc]", fontsize=9)
+        ax2.grid(alpha=0.18)
+        for ax in (ax1, ax2):
+            _dark_axes(fig, ax)
+        fig.tight_layout(pad=1.0)
         return _fig_to_image(fig)
 
     def _render_spectrum(self, ps, scale):
@@ -918,13 +954,20 @@ class AnalysisDrawer(Panel):
 
         titles = {"inspector": "Particle inspector", "phase": "Phase diagram",
                   "profile": "Radial profile", "stats": "Region statistics",
-                  "spectrum": "Power spectrum"}
+                  "spectrum": "Power spectrum",
+                  "orbit": "Orbit integration"}
         title = titles.get(self.mode, "")
 
         plot_img, caption = (None, "")
         rows = []
-        if self.mode in ("phase", "profile", "spectrum"):
+        if self.mode in ("phase", "profile", "spectrum", "orbit"):
             plot_img, caption = self._content_image(data)
+            if self.mode == "orbit" and plot_img is None:
+                rows = [("No orbit yet", "Shift+click a particle,"),
+                        ("", "then press Compute")]
+            elif self.mode == "orbit":
+                _, props = self._last_orbit
+                rows = []
         elif self.mode == "inspector":
             if self._picked_index is None:
                 rows = [("No particle picked", "Shift+click to pick")]
@@ -933,6 +976,17 @@ class AnalysisDrawer(Panel):
                     self._cache["inspector"] = analysis.particle_summary(
                         data, self._picked_index)
                 rows = self._cache["inspector"]
+        elif self.mode == "orbit" and self._last_orbit is not None:
+            _, props = self._last_orbit
+            rows = [
+                ("r_apo", f"{props['r_apo']:,.1f} kpc"),
+                ("r_peri", f"{props['r_peri']:,.1f} kpc"),
+                ("eccentricity", f"{props['eccentricity']:.3f}"),
+                ("T_orb", f"{props['T_orb']:.2f} Gyr"),
+                ("E_mean", f"{props['E_mean']:,.0f} km2/s2"),
+            ]
+            if props.get("circularity") is not None:
+                rows.append(("circularity", f"{props['circularity']:+.2f}"))
         elif self.mode == "stats":
             sc_center, sc_radius = self._active_scope()
             r_use = sc_radius if sc_radius is not None else self._stats_radius_kpc
@@ -980,7 +1034,8 @@ class AnalysisDrawer(Panel):
             tw = max(tw, ba[2] - ba[0] + bb[2] - bb[0] + 40 + M * 2)
         header_h = LH + 10
         footer_h = LH + 8 if self.mode in ("phase", "profile", "stats") else 6
-        body_h = (plot_img.height + 8 if plot_img is not None
+        body_h = (plot_img.height + 8 + LH * len(rows)
+                  if plot_img is not None
                   else LH * max(len(rows), 1) + 8)
         extra_h = LH if self.mode == "inspector" and self._picked_index is not None else 0
         scope_h = LH + 4 if self.scope is not None else 0
@@ -1009,6 +1064,12 @@ class AnalysisDrawer(Panel):
         if plot_img is not None:
             img.alpha_composite(plot_img, ((tw - plot_img.width) // 2, y))
             y += plot_img.height + 4
+            for a, b in rows:
+                draw.text((M, y + 2), str(a), fill=(168, 174, 188, 255),
+                          font=self._font)
+                draw.text((M + kv_w + 28, y + 2), str(b), fill=s.text_color,
+                          font=self._font)
+                y += LH
         else:
             for a, b in rows:
                 draw.text((M, y + 2), str(a), fill=(168, 174, 188, 255),
@@ -1091,6 +1152,11 @@ class AnalysisDrawer(Panel):
             bx = fbtn(bx, "Y>", "phase_y", active=self._phase_custom is not None)
             bx = fbtn(bx, f"W:{wgt}", "phase_w")
             bx = fbtn(bx, "Save", "phase_save")
+        elif self.mode == "orbit":
+            bx = M
+            bx = fbtn(bx, "Compute", "orbit_compute")
+            bx = fbtn(bx, "CSV", "orbit_csv")
+            bx = fbtn(bx, "Stream", "orbit_stream")
         elif self.mode == "spectrum":
             bx = M
             bx = fbtn(bx, "CSV", "spectrum_csv")
