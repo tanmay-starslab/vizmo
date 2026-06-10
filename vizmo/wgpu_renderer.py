@@ -2106,7 +2106,7 @@ class WGPURenderer:
         if owns_encoder:
             self.device.queue.submit([encoder.finish()])
 
-    def screenshot(self, path, width, height, camera, composite_args=None):
+    def screenshot(self, path, width, height, camera, composite_args=None, quiet=False):
         """Render one frame at (width, height) into an offscreen RGBA8
         texture and save it to `path`.
 
@@ -2117,6 +2117,7 @@ class WGPURenderer:
             composite_args: optional tuple
                 (m1, lo1, hi1, log1, m2, lo2, hi2, log2)
                 to render in composite mode. None → single-slot resolve.
+            quiet: suppress the "Saved screenshot" line (frame recording).
         """
         if self._colormap_tex is None:
             raise RuntimeError("screenshot: colormap not set")
@@ -2232,7 +2233,8 @@ class WGPURenderer:
         from PIL import Image
 
         Image.fromarray(arr, mode="RGBA").save(path)
-        print(f"  Saved screenshot: {path}")
+        if not quiet:
+            print(f"  Saved screenshot: {path}")
 
     def _read_accum_texture_r(self, texture, size=None):
         """Read back an accumulation texture's red channel as float32 array.

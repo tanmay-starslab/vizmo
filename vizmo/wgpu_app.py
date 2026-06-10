@@ -355,6 +355,21 @@ def run_wgpu_app(
                 print(f"FOV: {camera.adjust_fov(-5.0):.0f}°")
             elif key == glfw.KEY_RIGHT_BRACKET:
                 print(f"FOV: {camera.adjust_fov(+5.0):.0f}°")
+            elif key == glfw.KEY_V:
+                _toggle_recording()
+            elif glfw.KEY_1 <= key <= glfw.KEY_9:
+                slot = str(key - glfw.KEY_0)
+                from .session import camera_pose, apply_camera_pose, save_bookmarks
+
+                if mods & glfw.MOD_SHIFT:
+                    _bookmarks[slot] = camera_pose(camera)
+                    save_bookmarks(snapshot_path, _bookmarks)
+                    print(f"Bookmark {slot} saved")
+                elif slot in _bookmarks:
+                    apply_camera_pose(camera, _bookmarks[slot])
+                    print(f"Bookmark {slot} restored")
+                else:
+                    print(f"Bookmark {slot} is empty (Shift+{slot} to save)")
         # [ and ] repeat while held for a smooth zoom.
         if action == glfw.REPEAT:
             if key == glfw.KEY_LEFT_BRACKET:
@@ -570,6 +585,32 @@ def run_wgpu_app(
 
     needs_auto_range = True
     ui_hidden = False
+    # Camera bookmarks: per-snapshot poses persisted under ~/.config/vizmo.
+    from .session import load_bookmarks
+
+    _bookmarks = load_bookmarks(snapshot_path)
+    if _bookmarks:
+        print(f"  {len(_bookmarks)} camera bookmark(s) loaded (1-9 to jump, Shift+1-9 to save)")
+
+    # Frame recording (V key): dump every presented frame as a PNG into
+    # a timestamped directory for movie assembly.
+    _recording = {"dir": None, "frame": 0}
+
+    def _toggle_recording():
+        import os
+
+        if _recording["dir"] is None:
+            base = screenshot_dir or "."
+            _recording["dir"] = os.path.join(base, f"vizmo_rec_{int(time.time())}")
+            os.makedirs(_recording["dir"], exist_ok=True)
+            _recording["frame"] = 0
+            print(f"Recording frames to {_recording['dir']}/")
+        else:
+            d, n = _recording["dir"], _recording["frame"]
+            _recording["dir"] = None
+            print(f"Recording stopped: {n} frames in {d}/")
+            print(f"  Make a movie with e.g.: ffmpeg -framerate 30 -i {d}/frame_%05d.png -pix_fmt yuv420p out.mp4")
+
     # Main loop state
     last_time = time.perf_counter()
     frame_count = 0
@@ -759,10 +800,10 @@ def run_wgpu_app(
             screen_view=screen_view,
         )
 
-    def _take_screenshot(path=None):
+    def _take_screenshot(path=None, quiet=False):
         """Render the current view at full framebuffer resolution into
         an offscreen texture and save it. Filename defaults to
-        vizmo_<timestamp>.png in the cwd.
+        vizmo_<timestamp>.png in --screenshot-dir (or cwd).
         """
         import os
 
@@ -775,9 +816,9 @@ def run_wgpu_app(
             s0 = _state["_slot"][0]
             s1 = _state["_slot"][1]
             comp = (s0["resolve"], s0["min"], s0["max"], s0["log"], s1["resolve"], s1["min"], s1["max"], s1["log"])
-            renderer.screenshot(path, fb_w_, fb_h_, camera, composite_args=comp)
+            renderer.screenshot(path, fb_w_, fb_h_, camera, composite_args=comp, quiet=quiet)
         else:
-            renderer.screenshot(path, fb_w_, fb_h_, camera)
+            renderer.screenshot(path, fb_w_, fb_h_, camera, quiet=quiet)
         return os.path.abspath(path)
 
     print("vizmo [wgpu] running. WASD=move, mouse=look, F1/H=help, ESC=quit, R=auto-range, P=screenshot.")
@@ -1296,6 +1337,20 @@ def run_wgpu_app(
         if _do_present:
             canvas_context.present()
 
+        # Frame recording: capture every presented frame. Keeps the
+        # scene marked dirty so the idle short-circuit doesn't freeze
+        # the recording while the camera is still.
+        if _do_present and _recording["dir"] is not None:
+            import os
+
+            fp = os.path.join(_recording["dir"], f"frame_{_recording['frame']:05d}.png")
+            try:
+                _take_screenshot(fp, quiet=True)
+                _recording["frame"] += 1
+            except Exception as e:
+                print(f"Recording frame failed ({e}); recording stopped")
+                _recording["dir"] = None
+
         # On stationary refinement frames, block here until the GPU has
         # actually retired the work we just submitted. The point: when
         # the user resumes motion, there must be NO in-flight refinement
@@ -1316,7 +1371,9 @@ def run_wgpu_app(
         prev_cap = cap_now
         prev_n_particles = n_particles_now
         prev_fb_size = fb_size_now
-        dirty = False
+        # While recording, every frame must render+capture even if the
+        # camera is still, so the movie has constant pacing.
+        dirty = _recording["dir"] is not None
         ui_dirty = False
 
     # Cleanup
