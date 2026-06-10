@@ -140,6 +140,31 @@ and Orbit / go-to-center / axis views pivot about it. Profiles include
 shell density, enclosed mass, rotation curve v_c = sqrt(GM(<r)/r), and
 3D velocity dispersion.
 
+**Halo properties** (Stats panel, `Halo` button): spherical-overdensity
+masses M200c/R200c and M500c/R500c from the header cosmology, NFW
+concentration fit, Bullock spin, velocity anisotropy beta (coherent
+radial flows correctly excluded), gas / cold-gas / baryon fractions vs
+cosmic, boundary mass flux dM/dt, and an approximate circularity D/T
+when Potential is present. Load `--types 0,1,4` for meaningful virial
+masses. `JSON` exports everything with metadata.
+
+**Profiles**: shell density, enclosed mass, rotation curve, 3D velocity
+dispersion, specific angular momentum |sum m r x v|/M, plus any derived
+field (t_cool/t_ff, entropy, abundances, ...). `Split` overlays
+cold/warm/warm-hot/hot temperature-phase tracks; `CSV` exports.
+
+**Phase diagrams**: preset pairs or any-X vs any-Y (`X>` / `Y>` cycle
+every field), weighting selectable between mass / volume / SFR /
+number (`W:` button), `Save` writes the 2D histogram as FITS.
+
+**Power spectrum** (`Shift+K`): shell-averaged P(k) of the density (or
+any field) contrast via CIC + FFT inside the aperture cube; CSV export.
+
+**Selection regions** (programmatic + `--region-file` foundation):
+sphere, box, cylinder, slab, cone, ellipsoid primitives with boolean
+union / intersect / subtract composition (vizmo.selection), JSON
+persistence — the geometric base for multi-shape apertures.
+
 **Field filters** (`F`, or toolbar **Filters**): Firefly-style range
 cuts on any raw or derived field — e.g. show only gas with
 T < 3x10^4 K, or only inflowing material (RadialVelocity < 0).

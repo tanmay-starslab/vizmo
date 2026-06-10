@@ -754,11 +754,14 @@ def halo_properties(data, center=None, radius_kpc=None, max_samples=6_000_000):
     rr = np.linalg.norm(rvec, axis=1)
     rhat = rvec / np.maximum(rr, 1e-12)[:, None]
     vr = (dv * rhat).sum(axis=1)
-    sig2_tot = float((m_in * (dv * dv).sum(axis=1)).sum() / m_tot)
     vr_mean = float((m_in * vr).sum() / m_tot)
     sig2_r = float((m_in * (vr - vr_mean) ** 2).sum() / m_tot)
-    sig2_t = max(sig2_tot - sig2_r, 0.0)
-    if sig2_r > 0:
+    # Tangential dispersion from the residual after removing the radial
+    # component — keeps beta consistent when there is a coherent radial
+    # flow (a net out/inflow must not masquerade as anisotropy).
+    dv_t = dv - vr[:, None] * rhat
+    sig2_t = float((m_in * (dv_t * dv_t).sum(axis=1)).sum() / m_tot)
+    if sig2_r > 1e-3 * max(sig2_t, 1.0):
         beta = 1.0 - sig2_t / (2.0 * sig2_r)
         rows.append(("beta_anisotropy", f"{beta:+.2f}"))
 

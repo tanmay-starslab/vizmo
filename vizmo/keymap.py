@@ -27,6 +27,7 @@ KEYBINDINGS = [
     ("G", "Toggle phase diagram (mass-weighted 2D histogram)"),
     ("J", "Toggle radial profile about the view center"),
     ("U", "Toggle region statistics (sphere about center)"),
+    ("Shift+K", "Toggle power spectrum P(k) panel"),
     ("M", "Aperture mode: click=center, scroll=size, M again=set"),
     ("Shift+M", "Clear aperture (analysis back to global scope)"),
     ("F9", "Toggle science chrome (scale bar, status bar, axes)"),

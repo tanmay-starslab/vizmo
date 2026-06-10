@@ -508,8 +508,10 @@ class AnalysisDrawer(Panel):
     """
 
     PROFILE_FIELDS = ["Density", "RotationCurve", "VelocityDispersion3D",
-                      "EnclosedMass", "Temperature", "RadialVelocity",
-                      "MetallicityZsun", "Pressure", "VelocityMagnitude"]
+                      "EnclosedMass", "AngularMomentum", "Temperature",
+                      "RadialVelocity", "MetallicityZsun", "Pressure",
+                      "TcoolOverTff", "CoolingTime", "Entropy",
+                      "VelocityMagnitude"]
 
     def __init__(self):
         super().__init__(DRAWER_STYLE)
@@ -532,6 +534,15 @@ class AnalysisDrawer(Panel):
         # robust range nudging on wildly log-distributed fields.
         self._filter_field_idx = 0
         self._pctiles = {}
+        # Profile/phase/stats/spectrum tool state.
+        self._profile_split = False     # temperature-phase split tracks
+        self._phase_custom = None       # None=presets, else [xf, yf]
+        self._phase_weight_idx = 0      # index into PHASE_WEIGHTINGS
+        self._show_halo = False         # stats: append halo_properties
+        # Last computed results, for the export buttons.
+        self._last_profile = None       # (r, prof_or_tracks, field, unit)
+        self._last_phase = None         # phase dict
+        self._last_ps = None            # power spectrum dict
 
     # -- filters helpers -----------------------------------------------------
 
@@ -630,13 +641,22 @@ class AnalysisDrawer(Panel):
         sc_key = (None if sc_center is None
                   else (tuple(np.round(sc_center, 3)), round(sc_radius, 3)))
         if self.mode == "phase":
-            presets = self._phase_presets(data)
-            self._phase_idx %= len(presets)
-            xf, yf = presets[self._phase_idx]
-            key = ("phase", xf, yf, data.n_particles, sc_key)
+            from .analysis import PHASE_WEIGHTINGS
+
+            if self._phase_custom is not None:
+                xf, yf = self._phase_custom
+            else:
+                presets = self._phase_presets(data)
+                self._phase_idx %= len(presets)
+                xf, yf = presets[self._phase_idx]
+            wgt = PHASE_WEIGHTINGS[self._phase_weight_idx
+                                   % len(PHASE_WEIGHTINGS)]
+            key = ("phase", xf, yf, wgt, data.n_particles, sc_key)
             if key not in self._cache:
                 ph = analysis.phase_histogram(
-                    data, xf, yf, center=sc_center, radius_kpc=sc_radius)
+                    data, xf, yf, center=sc_center, radius_kpc=sc_radius,
+                    weighting=wgt)
+                self._last_phase = ph
                 self._cache[key] = self._render_phase(ph, scale)
             return self._cache[key], f"{xf} vs {yf}"
 
@@ -644,12 +664,37 @@ class AnalysisDrawer(Panel):
             fields = self._profile_fields(data)
             self._profile_idx %= len(fields)
             f = fields[self._profile_idx]
-            key = ("profile", f, data.n_particles, sc_key)
+            split = (self._profile_split
+                     and f not in analysis.SPECIAL_PROFILES
+                     and "Temperature" in data.available_fields_with_derived())
+            key = ("profile", f, split, data.n_particles, sc_key)
             if key not in self._cache:
-                r, prof, unit = analysis.radial_profile(
-                    data, f, center=sc_center, r_max_kpc=sc_radius)
-                self._cache[key] = self._render_profile(r, prof, unit, f, scale)
+                if split:
+                    r, tracks, unit = analysis.radial_profile_by_phase(
+                        data, f, center=sc_center, r_max_kpc=sc_radius)
+                    self._last_profile = (r, tracks, f, unit)
+                    self._cache[key] = self._render_profile_tracks(
+                        r, tracks, unit, f, scale)
+                else:
+                    r, prof, unit = analysis.radial_profile(
+                        data, f, center=sc_center, r_max_kpc=sc_radius)
+                    self._last_profile = (r, prof, f, unit)
+                    self._cache[key] = self._render_profile(
+                        r, prof, unit, f, scale)
             return self._cache[key], f"{f}(r)"
+
+        if self.mode == "spectrum":
+            key = ("spectrum", data.n_particles, sc_key)
+            if key not in self._cache:
+                from .power_spectrum import power_spectrum
+
+                ps = power_spectrum(data, center=sc_center,
+                                    radius_kpc=sc_radius)
+                self._last_ps = ps
+                self._cache[key] = self._render_spectrum(ps, scale)
+            box = (f"box {self._last_ps['box_kpc']:.0f} kpc"
+                   if self._last_ps else "")
+            return self._cache[key], box
         return None, ""
 
     def _render_phase(self, ph, scale):
@@ -672,7 +717,8 @@ class AnalysisDrawer(Panel):
                     interpolation="nearest",
                 )
             cb = fig.colorbar(im, ax=ax, pad=0.02)
-            cb.set_label("mass [Msun]", color=(0.88, 0.9, 0.95), fontsize=9)
+            cb.set_label(ph.get("wlabel", "mass [Msun]"),
+                         color=(0.88, 0.9, 0.95), fontsize=9)
             cb.ax.tick_params(colors=(0.82, 0.85, 0.9), labelsize=8)
             cb.outline.set_edgecolor((0.75, 0.78, 0.85, 0.8))
             ax.set_xlabel(ph["xlabel"], fontsize=10)
@@ -698,6 +744,59 @@ class AnalysisDrawer(Panel):
             ax.text(0.5, 0.5, "no data", ha="center", va="center")
         ax.set_xlabel("r [kpc]", fontsize=10)
         ax.set_ylabel(f"{field} [{unit}]" if unit else field, fontsize=10)
+        _dark_axes(fig, ax)
+        fig.tight_layout(pad=1.2)
+        return _fig_to_image(fig)
+
+    PHASE_COLORS = {"cold": (0.35, 0.65, 1.0), "warm": (0.4, 0.85, 0.5),
+                    "warm-hot": (1.0, 0.7, 0.25), "hot": (0.95, 0.35, 0.3)}
+
+    def _render_profile_tracks(self, r, tracks, unit, field, scale):
+        from matplotlib.figure import Figure
+
+        fig = Figure(figsize=(4.7 * scale, 3.9 * scale), dpi=100)
+        ax = fig.add_subplot(111)
+        any_pos, all_pos = False, True
+        for name, prof in tracks.items():
+            ok = np.isfinite(prof)
+            if ok.sum() > 1:
+                ax.plot(r[ok], prof[ok], lw=1.8,
+                        color=self.PHASE_COLORS.get(name, (0.8, 0.8, 0.8)),
+                        label=name)
+                any_pos = True
+                vals = prof[ok]
+                all_pos = all_pos and (vals > 0).all()
+        if any_pos:
+            ax.set_xscale("log")
+            if all_pos:
+                ax.set_yscale("log")
+            ax.grid(alpha=0.18, which="both")
+            leg = ax.legend(fontsize=8, framealpha=0.2, labelcolor="white")
+            leg.get_frame().set_facecolor((0.1, 0.12, 0.18))
+        else:
+            ax.text(0.5, 0.5, "no data", ha="center", va="center")
+        ax.set_xlabel("r [kpc]", fontsize=10)
+        ax.set_ylabel(f"{field} [{unit}]" if unit else field, fontsize=10)
+        _dark_axes(fig, ax)
+        fig.tight_layout(pad=1.2)
+        return _fig_to_image(fig)
+
+    def _render_spectrum(self, ps, scale):
+        from matplotlib.figure import Figure
+
+        fig = Figure(figsize=(4.7 * scale, 3.9 * scale), dpi=100)
+        ax = fig.add_subplot(111)
+        if ps is None:
+            ax.text(0.5, 0.5, "no data", ha="center", va="center")
+        else:
+            ok = np.isfinite(ps["pk"]) & (ps["pk"] > 0) & (ps["n_modes"] > 0)
+            ax.loglog(ps["k"][ok], ps["pk"][ok], lw=2.0,
+                      color=(0.42, 0.72, 1.0))
+            ax.grid(alpha=0.18, which="both")
+            ax.set_title(f"{ps['field']}  ({ps['n_grid']}^3 CIC)",
+                         fontsize=9)
+        ax.set_xlabel("k [1/kpc]", fontsize=10)
+        ax.set_ylabel("P(k) [kpc^3]", fontsize=10)
         _dark_axes(fig, ax)
         fig.tight_layout(pad=1.2)
         return _fig_to_image(fig)
@@ -796,6 +895,9 @@ class AnalysisDrawer(Panel):
     def update(self, data):
         if not self.enabled or self.mode is None:
             return
+        # Field list snapshot for the X/Y cycling buttons (on_click has
+        # no data handle).
+        self._all_fields = data.available_fields_with_derived()
         if self.mode == "filters":
             self._update_filters(data)
             return
@@ -806,12 +908,13 @@ class AnalysisDrawer(Panel):
         self._buttons = []
 
         titles = {"inspector": "Particle inspector", "phase": "Phase diagram",
-                  "profile": "Radial profile", "stats": "Region statistics"}
+                  "profile": "Radial profile", "stats": "Region statistics",
+                  "spectrum": "Power spectrum"}
         title = titles.get(self.mode, "")
 
         plot_img, caption = (None, "")
         rows = []
-        if self.mode in ("phase", "profile"):
+        if self.mode in ("phase", "profile", "spectrum"):
             plot_img, caption = self._content_image(data)
         elif self.mode == "inspector":
             if self._picked_index is None:
@@ -833,6 +936,15 @@ class AnalysisDrawer(Panel):
             rows, used_r = self._cache[key]
             if sc_radius is None:
                 self._stats_radius_kpc = used_r
+            if self._show_halo:
+                hkey = ("halo",) + key[1:]
+                if hkey not in self._cache:
+                    try:
+                        self._cache[hkey] = analysis.halo_properties(
+                            data, center=sc_center, radius_kpc=used_r)
+                    except Exception as e:
+                        self._cache[hkey] = [("Halo props failed", str(e)[:40])]
+                rows = list(rows) + [("--- halo ---", "")] + self._cache[hkey]
 
         scope_tag = ""
         if self.scope is not None:
@@ -938,29 +1050,48 @@ class AnalysisDrawer(Panel):
             y += LH + 4
 
         # Footer controls
-        if self.mode in ("phase", "profile"):
+        def fbtn(bx, lbl, action, active=False):
+            bb = dummy.textbbox((0, 0), lbl, font=self._font)
+            bw = max(bb[2] - bb[0] + 16, LH + 8)
+            fill = (40, 62, 90, 255) if active else s.slider_btn
+            _rounded(draw, [(bx, y + 2), (bx + bw, y + LH - 2)], 8,
+                     fill=fill, outline=(255, 255, 255, 45))
+            draw.text((bx + (bw - bb[2] + bb[0]) // 2, y), lbl,
+                      fill=s.text_color, font=self._font)
+            self._buttons.append((bx, y + 2, bx + bw, y + LH - 2, action))
+            return bx + bw + 6
+
+        if self.mode == "profile":
             bx = M
-            for lbl, action in (("<", "prev"), (">", "next")):
-                bw = LH + 8
-                _rounded(draw, [(bx, y + 2), (bx + bw, y + LH - 2)], 8,
-                         fill=s.slider_btn, outline=(255, 255, 255, 45))
-                bb = dummy.textbbox((0, 0), lbl, font=self._font)
-                draw.text((bx + (bw - bb[2] + bb[0]) // 2, y), lbl,
-                          fill=s.text_color, font=self._font)
-                self._buttons.append((bx, y + 2, bx + bw, y + LH - 2, action))
-                bx += bw + 8
+            bx = fbtn(bx, "<", "prev")
+            bx = fbtn(bx, ">", "next")
+            bx = fbtn(bx, "Split", "profile_split", active=self._profile_split)
+            bx = fbtn(bx, "CSV", "profile_csv")
+            draw.text((bx + 4, y + 1), caption, fill=(168, 174, 188, 255),
+                      font=self._font)
+        elif self.mode == "phase":
+            from .analysis import PHASE_WEIGHTINGS
+
+            wgt = PHASE_WEIGHTINGS[self._phase_weight_idx
+                                   % len(PHASE_WEIGHTINGS)]
+            bx = M
+            bx = fbtn(bx, "<", "prev")
+            bx = fbtn(bx, ">", "next")
+            bx = fbtn(bx, "X>", "phase_x", active=self._phase_custom is not None)
+            bx = fbtn(bx, "Y>", "phase_y", active=self._phase_custom is not None)
+            bx = fbtn(bx, f"W:{wgt}", "phase_w")
+            bx = fbtn(bx, "Save", "phase_save")
+        elif self.mode == "spectrum":
+            bx = M
+            bx = fbtn(bx, "CSV", "spectrum_csv")
             draw.text((bx + 6, y + 1), caption, fill=(168, 174, 188, 255),
                       font=self._font)
         elif self.mode == "stats":
             bx = M
-            for lbl, action in (("R/2", "r_half"), ("Rx2", "r_double")):
-                bb = dummy.textbbox((0, 0), lbl, font=self._font)
-                bw = bb[2] - bb[0] + 20
-                _rounded(draw, [(bx, y + 2), (bx + bw, y + LH - 2)], 8,
-                         fill=s.slider_btn, outline=(255, 255, 255, 45))
-                draw.text((bx + 10, y), lbl, fill=s.text_color, font=self._font)
-                self._buttons.append((bx, y + 2, bx + bw, y + LH - 2, action))
-                bx += bw + 8
+            bx = fbtn(bx, "R/2", "r_half")
+            bx = fbtn(bx, "Rx2", "r_double")
+            bx = fbtn(bx, "Halo", "stats_halo", active=self._show_halo)
+            bx = fbtn(bx, "JSON", "stats_json")
 
         self._panel_w, self._panel_h = tw, th
         self._panel_x, self._panel_y = self._panel_origin(tw, th)
@@ -983,6 +1114,7 @@ class AnalysisDrawer(Panel):
                 if action == "prev":
                     if self.mode == "phase":
                         self._phase_idx -= 1
+                        self._phase_custom = None
                     else:
                         self._profile_idx -= 1
                     self._last_key = None
@@ -990,6 +1122,7 @@ class AnalysisDrawer(Panel):
                 if action == "next":
                     if self.mode == "phase":
                         self._phase_idx += 1
+                        self._phase_custom = None
                     else:
                         self._profile_idx += 1
                     self._last_key = None
@@ -1009,6 +1142,31 @@ class AnalysisDrawer(Panel):
                 if action == "toggle_scope":
                     self.use_scope = not self.use_scope
                     self.refresh()
+                    return True
+                if action == "profile_split":
+                    self._profile_split = not self._profile_split
+                    self._last_key = None
+                    return True
+                if action in ("phase_x", "phase_y"):
+                    fields = getattr(self, "_all_fields", None) or ["Masses"]
+                    if self._phase_custom is None:
+                        # Seed custom mode from a sane default pair.
+                        self._phase_custom = [fields[0],
+                                              fields[min(1, len(fields) - 1)]]
+                    i = 0 if action == "phase_x" else 1
+                    cur = self._phase_custom[i]
+                    j = (fields.index(cur) + 1) % len(fields) \
+                        if cur in fields else 0
+                    self._phase_custom[i] = fields[j]
+                    self._last_key = None
+                    return True
+                if action == "phase_w":
+                    self._phase_weight_idx += 1
+                    self._last_key = None
+                    return True
+                if action == "stats_halo":
+                    self._show_halo = not self._show_halo
+                    self._last_key = None
                     return True
                 if (isinstance(action, tuple) and action
                         and action[0] == "f_field"):

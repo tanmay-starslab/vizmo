@@ -485,7 +485,10 @@ def run_wgpu_app(
             elif key == glfw.KEY_BACKSLASH:
                 overlay.enabled = not overlay.enabled
             elif key == glfw.KEY_K:
-                sink_panel.enabled = not sink_panel.enabled
+                if mods & glfw.MOD_SHIFT:
+                    drawer.toggle("spectrum")
+                else:
+                    sink_panel.enabled = not sink_panel.enabled
             elif key == glfw.KEY_TAB:
                 ui_hidden = not ui_hidden
             elif key == glfw.KEY_B:
@@ -826,6 +829,9 @@ def run_wgpu_app(
                     scale_bar._last_key = None
                     app_proxy._apply_render_mode(auto_range=False)
                     toasts.show("View center moved to picked particle", "ok")
+                elif dr_action in ("profile_csv", "phase_save",
+                                   "stats_json", "spectrum_csv"):
+                    _handle_drawer_export(dr_action)
                 elif (isinstance(dr_action, tuple) and dr_action
                         and str(dr_action[0]).startswith("f_")):
                     _handle_filter_action(dr_action)
@@ -1278,6 +1284,72 @@ def run_wgpu_app(
             toasts.show(f"FITS map saved: {os.path.basename(fpath)}", "ok")
         except Exception as e:
             toasts.show(f"FITS export failed: {e}", "error")
+
+    def _handle_drawer_export(action):
+        """Write the drawer's last computed result to disk."""
+        import os
+
+        base = screenshot_dir or "."
+        ts = int(time.time())
+        try:
+            if action == "profile_csv" and drawer._last_profile is not None:
+                from .analysis import profile_to_csv
+
+                r, prof, fld, unit = drawer._last_profile
+                out = os.path.join(base, f"vizmo_profile_{fld}_{ts}.csv")
+                profile_to_csv(out, r, prof, fld, unit)
+                toasts.show(f"Profile saved: {os.path.basename(out)}", "ok")
+            elif action == "phase_save" and drawer._last_phase is not None:
+                from astropy.io import fits as pyfits
+
+                ph = drawer._last_phase
+                out = os.path.join(
+                    base, f"vizmo_phase_{ph['xfield']}_{ph['yfield']}_{ts}.fits")
+                hdu = pyfits.PrimaryHDU(ph["H"].T.astype(np.float32))
+                hd = hdu.header
+                hd["XFIELD"] = ph["xfield"]
+                hd["YFIELD"] = ph["yfield"]
+                hd["XLOG"] = ph["xlog"]
+                hd["YLOG"] = ph["ylog"]
+                hd["WEIGHT"] = ph["weighting"]
+                hd["XMIN"], hd["XMAX"] = ph["xedges"][0], ph["xedges"][-1]
+                hd["YMIN"], hd["YMAX"] = ph["yedges"][0], ph["yedges"][-1]
+                hdu.writeto(out, overwrite=True)
+                toasts.show(f"Phase histogram saved: {os.path.basename(out)}", "ok")
+            elif action == "stats_json":
+                from .analysis import region_stats, halo_properties, stats_to_json
+                from .physics import UnitSystem as _US
+
+                sc_center, sc_radius = drawer._active_scope()
+                r_use = (sc_radius if sc_radius is not None
+                         else drawer._stats_radius_kpc)
+                rows, used_r = region_stats(data, center=sc_center,
+                                            radius_kpc=r_use)
+                halo_rows = halo_properties(data, center=sc_center,
+                                            radius_kpc=used_r)
+                meta = {
+                    "snapshot": snapshot_path,
+                    "redshift": float(units.redshift),
+                    "radius_kpc": used_r,
+                    "center_code_units": (
+                        None if sc_center is None
+                        else [float(v) for v in sc_center]),
+                    "particle_types": list(data.particle_types),
+                    "timestamp": ts,
+                }
+                out = os.path.join(base, f"vizmo_stats_{ts}.json")
+                stats_to_json(out, rows, halo_rows, meta)
+                toasts.show(f"Stats saved: {os.path.basename(out)}", "ok")
+            elif action == "spectrum_csv" and drawer._last_ps is not None:
+                from .power_spectrum import power_spectrum_to_csv
+
+                out = os.path.join(base, f"vizmo_pk_{ts}.csv")
+                power_spectrum_to_csv(out, drawer._last_ps)
+                toasts.show(f"P(k) saved: {os.path.basename(out)}", "ok")
+            else:
+                toasts.show("Nothing to export yet", "warn")
+        except Exception as e:
+            toasts.show(f"Export failed: {e}", "error")
 
     def _handle_filter_action(action):
         """Mutate data.filters from a drawer action and re-render.
