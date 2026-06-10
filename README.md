@@ -45,7 +45,7 @@ Run `vizmo` with a snapshot file as the argument:
 vizmo path/to/snapshot.hdf5
 ```
 
-For gizmo/arepo/gadget: The snapshot must contain at least one `PartTypeN` group with `Coordinates` and `Masses`. Smoothing lengths are taken from `SmoothingLength`/`KernelMaxRadius`/`Hsml` if present, otherwise from a per-type softening in the header (e.g. `SofteningTypeN`, `SofteningTable`), and as a last resort computed on the fly via `meshoid.Meshoid(x, boxsize=boxsize).SmoothingLength()`. Star particles (`PartType5`) are rendered as point sources when present.
+For gizmo/arepo/gadget: The snapshot must contain at least one `PartTypeN` group with `Coordinates`. Masses come from a per-particle `Masses` dataset or, when absent (TNG-style dark matter), from the header `MassTable`. Smoothing lengths are taken from `SmoothingLength`/`KernelMaxRadius`/`Hsml`/`StellarHsml`/`SubfindHsml` if present, otherwise from a per-type softening in the header (e.g. `SofteningTypeN`, `SofteningTable`), and as a last resort computed on the fly via meshoid — that last-resort result is cached under `~/.cache/vizmo` so it only happens once per snapshot. Star particles (`PartType5`) are rendered as point sources when present.
 
 ### Particle type selection
 
@@ -55,8 +55,28 @@ A row of six tickboxes labeled `0`–`5` at the top of the user menu controls wh
 
 ```
 vizmo snapshot.hdf5 [--width 1920] [--height 1080] [--fov 90]
-                        [--fullscreen] [--screenshot OUT.png]
-                        [--profile OUT.pstats]
+                    [--fullscreen] [--screenshot OUT.png]
+                    [--profile OUT.pstats]
+                    [--types 0,1,4] [--center X,Y,Z | --center-on MODE]
+                    [--radius R] [--colormap NAME] [--screenshot-dir DIR]
+```
+
+- `--types 0,1,4` — initial `PartTypeN` selection (default: gas only).
+- `--center X,Y,Z` — aim the starting view at this point (snapshot coords).
+- `--center-on {densest,potential,com,median}` — auto-find the starting
+  center: highest-density particle, potential minimum, center of mass, or
+  mass-weighted median. Falls back to `median` when the needed fields are
+  missing.
+- `--radius R` — starting camera distance from the center; also rescales
+  flight speed to the framed region.
+- `--colormap NAME` — starting colormap.
+- `--screenshot-dir DIR` — where `P`-key screenshots and `V`-key frame
+  recordings go (default: cwd).
+
+Centering on the densest gas of a TNG halo cutout, for example:
+
+```bash
+vizmo cutout.hdf5 --center-on densest --radius 300 --colormap inferno
 ```
 
 ## Rendering backend
@@ -75,12 +95,18 @@ Getting this to work on 100M+ particle datasets has been tricky. Here is what ha
 
 ## Controls
 
+Press `F1` or `H` in-app for this list. The top-left toolbar gives
+one-click Auto-range / Screenshot / Rec / Help.
+
 **Camera:**
 - `W/A/S/D` — Move forward/left/back/right
 - `Z/X` — Move up/down
 - `Q/E` — Roll left/right
 - Mouse (click + drag) — Look around
-- Scroll wheel — Adjust speed
+- Scroll wheel — Adjust flight speed
+- `Ctrl`+Scroll or `[/]` — Optical zoom (FOV 10–140°)
+- `1-9` — Jump to camera bookmark; `Shift+1-9` — save bookmark
+  (persisted per snapshot under `~/.config/vizmo`)
 
 **Visualization:**
 - `Tab` — Hide/show all UI
@@ -89,11 +115,16 @@ Getting this to work on 100M+ particle datasets has been tricky. Here is what ha
 - `R` — Auto-range color scale (composite: Color slot)
 - `T` — Auto-range composite Lightness slot
 - `+/-` — Contract/expand color range
-- `[/]` — Coarser/finer LOD pixel size
 - `,/.` — Lower/raise the auto-LOD subsample-cap ceiling
 - `P` — Save screenshot
-- `F1` or `\` — Toggle dev overlay
-- `Esc` — Quit
+- `V` — Start/stop frame recording (PNG sequence + ffmpeg hint)
+- `F1` or `H` — Help panel
+- `\` — Toggle dev overlay
+- `K` — Toggle sink/star panel
+- `Esc` — Close help, then quit
+
+Colormap, mouse inversion, and target FPS persist across sessions in
+`~/.config/vizmo/config.json`.
 
 ## Render Modes
 
