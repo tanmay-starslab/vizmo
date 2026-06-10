@@ -2350,3 +2350,395 @@ class WGPURenderer:
         self._star_masses = None
         self._accum_textures = None
         self._accum_textures2 = None
+
+
+# ---------------------------------------------------------------------------
+# Slice plane (Section 5.A)
+# ---------------------------------------------------------------------------
+
+def plane_basis(normal):
+    """Orthonormal in-plane basis (e1, e2) for a plane normal.
+
+    Args:
+        normal: (3,) array, need not be unit length.
+
+    Returns:
+        (e1, e2, n_hat) float64 unit vectors.
+    """
+    n = np.asarray(normal, dtype=np.float64)
+    n = n / max(np.linalg.norm(n), 1e-30)
+    ref = (np.array([0.0, 0.0, 1.0]) if abs(n[2]) < 0.9
+           else np.array([0.0, 1.0, 0.0]))
+    e1 = np.cross(ref, n)
+    e1 /= max(np.linalg.norm(e1), 1e-30)
+    e2 = np.cross(n, e1)
+    return e1, e2, n
+
+
+def slab_cull_to_plane(pos, hsml, values, center, normal, half_size):
+    """Select particles whose kernels intersect the slice plane and
+    transform them into plane coordinates.
+
+    Returns (pos_h (N,4) float32 [e1, e2, dist_to_plane, hsml],
+    vals (N,) float32). Particles outside the grid footprint (padded
+    by hsml) are dropped.
+    """
+    e1, e2, n = plane_basis(normal)
+    center = np.asarray(center, dtype=np.float64)
+    rel = np.asarray(pos, dtype=np.float64) - center[None, :]
+    d_n = rel @ n
+    h = np.asarray(hsml, dtype=np.float64)
+    keep = np.abs(d_n) < h
+    if not keep.any():
+        return (np.zeros((0, 4), dtype=np.float32),
+                np.zeros(0, dtype=np.float32))
+    rel = rel[keep]
+    u = rel @ e1
+    v = rel @ e2
+    hk = h[keep]
+    inside = ((np.abs(u) < half_size + hk)
+              & (np.abs(v) < half_size + hk))
+    u, v = u[inside], v[inside]
+    dz = d_n[keep][inside]
+    hk = hk[inside]
+    vals = np.asarray(values, dtype=np.float64)[keep][inside]
+    pos_h = np.stack([u, v, dz, hk], axis=1).astype(np.float32)
+    return pos_h, vals.astype(np.float32)
+
+
+def _kernel_m4_np(u):
+    out = np.zeros_like(u)
+    m1 = u < 0.5
+    m2 = (u >= 0.5) & (u < 1.0)
+    out[m1] = 1.0 - 6.0 * u[m1] ** 2 + 6.0 * u[m1] ** 3
+    out[m2] = 2.0 * (1.0 - u[m2]) ** 3
+    return out * (8.0 / np.pi)
+
+
+def compute_slice_grid_cpu(pos_h, vals, half_size, res):
+    """CPU reference for the slice.wgsl kernel-weighted reconstruction.
+
+    Scatter implementation: each particle deposits W(r)/h^3 weights
+    into the pixels inside its kernel footprint, identical math to the
+    shader's per-pixel gather. Empty pixels return NaN.
+
+    Args:
+        pos_h: (N, 4) plane-frame [u, v, dist_to_plane, hsml].
+        vals: (N,) field values.
+        half_size: half extent of the grid (world units).
+        res: output resolution.
+
+    Returns:
+        (res, res) float64 grid, row-major [v, u] to match the shader's
+        y*res + x layout.
+    """
+    num = np.zeros((res, res))
+    den = np.zeros((res, res))
+    if len(pos_h) == 0:
+        return np.full((res, res), np.nan)
+    cell = 2.0 * half_size / res
+    centers = -half_size + (np.arange(res) + 0.5) * cell
+    u, v, dz, h = (pos_h[:, 0].astype(np.float64),
+                   pos_h[:, 1].astype(np.float64),
+                   pos_h[:, 2].astype(np.float64),
+                   pos_h[:, 3].astype(np.float64))
+    vals = np.asarray(vals, dtype=np.float64)
+    for i in range(len(u)):
+        # In-plane kernel footprint radius.
+        r_in2 = h[i] ** 2 - dz[i] ** 2
+        if r_in2 <= 0:
+            continue
+        r_in = np.sqrt(r_in2)
+        i0 = max(int(np.searchsorted(centers, u[i] - r_in)) - 1, 0)
+        i1 = min(int(np.searchsorted(centers, u[i] + r_in)) + 1, res)
+        j0 = max(int(np.searchsorted(centers, v[i] - r_in)) - 1, 0)
+        j1 = min(int(np.searchsorted(centers, v[i] + r_in)) + 1, res)
+        if i0 >= i1 or j0 >= j1:
+            continue
+        du = centers[i0:i1] - u[i]
+        dv = centers[j0:j1] - v[i]
+        r = np.sqrt(du[None, :] ** 2 + dv[:, None] ** 2 + dz[i] ** 2)
+        w = _kernel_m4_np(r / h[i]) / h[i] ** 3
+        num[j0:j1, i0:i1] += vals[i] * w
+        den[j0:j1, i0:i1] += w
+    with np.errstate(invalid="ignore", divide="ignore"):
+        grid = np.where(den > 0, num / den, np.nan)
+    return grid
+
+
+def slice_grid_to_fits(grid, center_kpc, size_kpc, path, field="Masses",
+                       unit="", normal_label="z"):
+    """Write a slice grid as FITS with a linear-kpc WCS.
+
+    CRPIX at the image center, CDELT = size_kpc / res — the same
+    conventions as export_fits_map, so CARTA/DS9 read it directly.
+    """
+    from astropy.io import fits as pyfits
+
+    grid = np.asarray(grid, dtype=np.float32)
+    res = grid.shape[0]
+    hdu = pyfits.PrimaryHDU(grid)
+    hd = hdu.header
+    hd["BUNIT"] = unit or "code units"
+    hd["FIELD"] = field
+    hd["CTYPE1"] = "LINEAR"
+    hd["CTYPE2"] = "LINEAR"
+    hd["CUNIT1"] = "kpc"
+    hd["CUNIT2"] = "kpc"
+    hd["CRPIX1"] = res / 2 + 0.5
+    hd["CRPIX2"] = res / 2 + 0.5
+    hd["CRVAL1"] = 0.0
+    hd["CRVAL2"] = 0.0
+    hd["CDELT1"] = size_kpc / res
+    hd["CDELT2"] = size_kpc / res
+    hd["SLICENRM"] = normal_label
+    hd["CENX"] = float(center_kpc[0])
+    hd["CENY"] = float(center_kpc[1])
+    hd["CENZ"] = float(center_kpc[2])
+    hd["ORIGIN"] = "vizmo slice plane (kernel-weighted reconstruction)"
+    hdu.writeto(path, overwrite=True)
+    return path
+
+
+_SLICE_QUAD_WGSL = """
+struct VSOut {
+    @builtin(position) position: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+};
+
+@vertex
+fn vs_main(@location(0) pos: vec2<f32>, @location(1) uv: vec2<f32>) -> VSOut {
+    var out: VSOut;
+    out.position = vec4<f32>(pos, 0.0, 1.0);
+    out.uv = uv;
+    return out;
+}
+
+@group(0) @binding(0) var t_slice: texture_2d<f32>;
+@group(0) @binding(1) var s_slice: sampler;
+
+@fragment
+fn fs_main(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
+    return textureSample(t_slice, s_slice, uv);
+}
+"""
+
+# Cap on slab-culled particles sent to the GPU gather (keeps the
+# res^2 * N inner loop bounded; ~65k * 512^2 = 1.7e10 MACs, tens of
+# ms on an Apple-class GPU for a one-shot recompute).
+SLICE_GPU_MAX_PARTICLES = 65536
+
+
+class SlicePlaneRenderer:
+    """Slice-plane compute + textured-quad blit.
+
+    compute() tries the slice.wgsl GPU gather first and falls back to
+    the identical-math CPU scatter (compute_slice_grid_cpu) on any
+    failure — documented fallback per Section 5.A. The result grid is
+    colormapped on the CPU and drawn as a textured quad whose corners
+    the app projects into NDC each frame.
+    """
+
+    def __init__(self, device, present_format):
+        self.device = device
+        self.grid = None           # last computed (res, res) grid
+        self.used_gpu = False
+        self._tex = None
+        self._tex_size = (0, 0)
+        self._sampler = device.create_sampler(mag_filter="linear",
+                                              min_filter="linear")
+        shader = device.create_shader_module(code=_SLICE_QUAD_WGSL)
+        self._bgl = device.create_bind_group_layout(entries=[
+            {"binding": 0, "visibility": wgpu.ShaderStage.FRAGMENT,
+             "texture": {"sample_type": "float"}},
+            {"binding": 1, "visibility": wgpu.ShaderStage.FRAGMENT,
+             "sampler": {"type": "filtering"}},
+        ])
+        layout = device.create_pipeline_layout(bind_group_layouts=[self._bgl])
+        self._pipeline = device.create_render_pipeline(
+            layout=layout,
+            vertex={
+                "module": shader, "entry_point": "vs_main",
+                "buffers": [{
+                    "array_stride": 16, "step_mode": "vertex",
+                    "attributes": [
+                        {"format": "float32x2", "offset": 0,
+                         "shader_location": 0},
+                        {"format": "float32x2", "offset": 8,
+                         "shader_location": 1},
+                    ],
+                }],
+            },
+            primitive={"topology": "triangle-list"},
+            fragment={
+                "module": shader, "entry_point": "fs_main",
+                "targets": [{"format": present_format, "blend": {
+                    "color": {"src_factor": "src-alpha",
+                              "dst_factor": "one-minus-src-alpha"},
+                    "alpha": {"src_factor": "one",
+                              "dst_factor": "one-minus-src-alpha"},
+                }}],
+            },
+        )
+        self._bind_group = None
+        self._vbo = None
+        # Lazy compute pipeline (built on first GPU compute attempt).
+        self._compute_pipeline = None
+        self._compute_bgl = None
+
+    # -- compute ------------------------------------------------------------
+
+    def _ensure_compute_pipeline(self):
+        if self._compute_pipeline is not None:
+            return
+        dev = self.device
+        shader = dev.create_shader_module(code=_load_wgsl("slice.wgsl"))
+        self._compute_bgl = dev.create_bind_group_layout(entries=[
+            {"binding": 0, "visibility": wgpu.ShaderStage.COMPUTE,
+             "buffer": {"type": "uniform"}},
+            {"binding": 1, "visibility": wgpu.ShaderStage.COMPUTE,
+             "buffer": {"type": "read-only-storage"}},
+            {"binding": 2, "visibility": wgpu.ShaderStage.COMPUTE,
+             "buffer": {"type": "read-only-storage"}},
+            {"binding": 3, "visibility": wgpu.ShaderStage.COMPUTE,
+             "buffer": {"type": "storage"}},
+        ])
+        layout = dev.create_pipeline_layout(
+            bind_group_layouts=[self._compute_bgl])
+        self._compute_pipeline = dev.create_compute_pipeline(
+            layout=layout,
+            compute={"module": shader, "entry_point": "cs_main"})
+
+    def _compute_gpu(self, pos_h, vals, half_size, res):
+        dev = self.device
+        self._ensure_compute_pipeline()
+        n = len(pos_h)
+        params = np.zeros(4, dtype=np.float32)
+        params[0] = half_size
+        params.view(np.uint32)[1] = res
+        params.view(np.uint32)[2] = n
+        pbuf = dev.create_buffer_with_data(
+            data=params.tobytes(),
+            usage=wgpu.BufferUsage.UNIFORM)
+        posbuf = dev.create_buffer_with_data(
+            data=np.ascontiguousarray(pos_h, dtype=np.float32).tobytes(),
+            usage=wgpu.BufferUsage.STORAGE)
+        valbuf = dev.create_buffer_with_data(
+            data=np.ascontiguousarray(vals, dtype=np.float32).tobytes(),
+            usage=wgpu.BufferUsage.STORAGE)
+        outbuf = dev.create_buffer(
+            size=res * res * 4,
+            usage=wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_SRC)
+        bg = dev.create_bind_group(
+            layout=self._compute_bgl,
+            entries=[
+                {"binding": 0, "resource": {"buffer": pbuf}},
+                {"binding": 1, "resource": {"buffer": posbuf}},
+                {"binding": 2, "resource": {"buffer": valbuf}},
+                {"binding": 3, "resource": {"buffer": outbuf}},
+            ])
+        enc = dev.create_command_encoder()
+        cpass = enc.begin_compute_pass()
+        cpass.set_pipeline(self._compute_pipeline)
+        cpass.set_bind_group(0, bg)
+        cpass.dispatch_workgroups((res + 7) // 8, (res + 7) // 8)
+        cpass.end()
+        dev.queue.submit([enc.finish()])
+        raw = dev.queue.read_buffer(outbuf)
+        grid = np.frombuffer(raw, dtype=np.float32).reshape(res, res).copy()
+        grid[grid <= -1.0e29] = np.nan  # empty-pixel sentinel
+        return grid.astype(np.float64)
+
+    def compute(self, pos, hsml, values, center, normal, half_size,
+                res=512):
+        """Recompute the slice grid. GPU first, CPU fallback."""
+        pos_h, vals = slab_cull_to_plane(pos, hsml, values, center,
+                                         normal, half_size)
+        if len(pos_h) > SLICE_GPU_MAX_PARTICLES:
+            rng = np.random.default_rng(0)
+            sel = rng.choice(len(pos_h), size=SLICE_GPU_MAX_PARTICLES,
+                             replace=False)
+            pos_h, vals = pos_h[sel], vals[sel]
+        try:
+            self.grid = self._compute_gpu(pos_h, vals, half_size, res)
+            self.used_gpu = True
+        except Exception as e:
+            # Documented CPU fallback: same kernel math, numpy scatter.
+            print(f"  slice: GPU compute unavailable ({e}); CPU fallback")
+            self.grid = compute_slice_grid_cpu(pos_h, vals, half_size, res)
+            self.used_gpu = False
+        return self.grid
+
+    # -- draw ---------------------------------------------------------------
+
+    def upload_colormapped(self, colormap_rgba, vmin, vmax, log_scale,
+                           opacity=0.85):
+        """Map the grid through a (256, 4) colormap LUT and upload."""
+        if self.grid is None:
+            return
+        g = self.grid
+        vals = np.where(np.isfinite(g), g, np.nan)
+        if log_scale:
+            with np.errstate(invalid="ignore", divide="ignore"):
+                vals = np.log10(np.where(vals > 0, vals, np.nan))
+        t = (vals - vmin) / max(vmax - vmin, 1e-30)
+        idx = np.clip((t * 255), 0, 255)
+        nanmask = ~np.isfinite(idx)
+        idx = np.where(nanmask, 0, idx).astype(np.uint8)
+        rgba = colormap_rgba[idx]
+        rgba[..., 3] = np.where(nanmask, 0,
+                                int(np.clip(opacity, 0, 1) * 255))
+        rgba = np.ascontiguousarray(rgba)
+        res = rgba.shape[0]
+        dev = self.device
+        if self._tex_size != (res, res):
+            self._tex = dev.create_texture(
+                size=(res, res, 1), format="rgba8unorm",
+                usage=(wgpu.TextureUsage.TEXTURE_BINDING
+                       | wgpu.TextureUsage.COPY_DST))
+            self._tex_size = (res, res)
+            self._bind_group = dev.create_bind_group(
+                layout=self._bgl,
+                entries=[
+                    {"binding": 0, "resource": self._tex.create_view()},
+                    {"binding": 1, "resource": self._sampler},
+                ])
+        dev.queue.write_texture(
+            {"texture": self._tex, "mip_level": 0, "origin": (0, 0, 0)},
+            rgba.tobytes(), {"bytes_per_row": res * 4,
+                             "rows_per_image": res},
+            (res, res, 1))
+
+    def render_to_pass(self, rpass, ndc_corners):
+        """Draw the slice quad. ndc_corners: 4 (x, y) NDC points in
+        the order (-u-v, +u-v, +u+v, -u+v) of plane coordinates."""
+        if self._bind_group is None:
+            return
+        c = ndc_corners
+        verts = np.array([
+            c[0][0], c[0][1], 0, 0,  c[1][0], c[1][1], 1, 0,
+            c[3][0], c[3][1], 0, 1,
+            c[1][0], c[1][1], 1, 0,  c[2][0], c[2][1], 1, 1,
+            c[3][0], c[3][1], 0, 1,
+        ], dtype=np.float32)
+        dev = self.device
+        vb = verts.tobytes()
+        if self._vbo is None or self._vbo.size < len(vb):
+            self._vbo = dev.create_buffer_with_data(
+                data=vb, usage=(wgpu.BufferUsage.VERTEX
+                                | wgpu.BufferUsage.COPY_DST))
+        else:
+            dev.queue.write_buffer(self._vbo, 0, vb)
+        rpass.set_pipeline(self._pipeline)
+        rpass.set_bind_group(0, self._bind_group)
+        rpass.set_vertex_buffer(0, self._vbo)
+        rpass.draw(6)
+
+
+def slice_plane_mode():
+    """RenderMode marker for the slice plane (Section 5.A)."""
+    return RenderMode(name="SlicePlane", weight_field="",
+                      qty_field="", resolve_mode=-2)
+
+
+RenderMode.slice_plane = staticmethod(slice_plane_mode)

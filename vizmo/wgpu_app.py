@@ -275,6 +275,74 @@ def run_wgpu_app(
     _sightlines = {"list": [], "placing": False, "pending_start": None,
                    "trident_procs": []}
     drawer.sightlines = _sightlines["list"]
+
+    # Slice plane (Section 5.A). Shift+Z activates / cycles the normal;
+    # Ctrl+drag translates the plane along its normal; the drawer's
+    # "slice" tool exposes axis/offset/opacity/resolution controls.
+    from .wgpu_renderer import SlicePlaneRenderer, plane_basis
+
+    slice_renderer = SlicePlaneRenderer(device, present_format)
+    _SLICE_NORMALS = [("camera-right", None), ("+X", (1.0, 0, 0)),
+                      ("+Y", (0, 1.0, 0)), ("+Z", (0, 0, 1.0))]
+    _slice = {
+        "active": False, "normal_idx": 3, "offset": 0.0,  # code units
+        "res": 256, "opacity": 0.85, "dirty": False,
+        "normal_label": "+Z", "used_gpu": False,
+        "size_kpc": 0.0, "offset_kpc": 0.0,
+    }
+    drawer.slice_state = _slice
+
+    def _slice_normal():
+        name, vec = _SLICE_NORMALS[_slice["normal_idx"]]
+        if vec is None:
+            return camera.right.astype(np.float64), name
+        return np.asarray(vec, dtype=np.float64), name
+
+    def _recompute_slice():
+        if not _slice["active"]:
+            return
+        normal, name = _slice_normal()
+        _slice["normal_label"] = name
+        center = _focus_center() + _slice["offset"] * normal
+        d_cam = float(np.linalg.norm(camera.position - _focus_center()))
+        half = max(d_cam * 0.6, 1e-6)
+        field = (_state["_wa_data_field"]
+                 if _state["_render_mode_name"] in
+                 ("WeightedAverage", "WeightedVariance")
+                 else _state["_sd_field"])
+        try:
+            vals = (data.masses if field == "Masses"
+                    else np.asarray(data.get_field(field)))
+            slice_renderer.compute(data.positions, data.hsml, vals,
+                                   center, normal, half,
+                                   res=_slice["res"])
+            _slice["used_gpu"] = slice_renderer.used_gpu
+            _slice["size_kpc"] = 2 * half * units.length_to_kpc
+            _slice["offset_kpc"] = _slice["offset"] * units.length_to_kpc
+            g = slice_renderer.grid
+            fin = g[np.isfinite(g)]
+            if fin.size and renderer.log_scale:
+                pos_v = fin[fin > 0]
+                vmin = (np.log10(np.percentile(pos_v, 1))
+                        if pos_v.size else 0.0)
+                vmax = (np.log10(np.percentile(pos_v, 99.9))
+                        if pos_v.size else 1.0)
+            elif fin.size:
+                vmin, vmax = (float(np.percentile(fin, 1)),
+                              float(np.percentile(fin, 99.9)))
+            else:
+                vmin, vmax = 0.0, 1.0
+            from .colormaps import colormap_to_texture_data
+
+            lut = colormap_to_texture_data(
+                AVAILABLE_COLORMAPS[_state["_cmap_idx"]])
+            slice_renderer.upload_colormapped(
+                lut, vmin, vmax, renderer.log_scale,
+                opacity=_slice["opacity"])
+            _slice["_geom"] = (center.copy(), normal.copy(), half)
+            drawer.refresh()
+        except Exception as e:
+            toasts.show(f"Slice failed: {e}", "error")
     _aperture = {
         "active": False,      # submitted and in use
         "placing": False,     # interactive placement in progress
@@ -481,7 +549,13 @@ def run_wgpu_app(
             if key == glfw.KEY_ESCAPE:
                 # Esc cancels aperture placement, then closes panels;
                 # quits only when nothing is in the way.
-                if _aperture["placing"]:
+                if _slice["active"]:
+                    _slice["active"] = False
+                    if drawer.mode == "slice":
+                        drawer.enabled = False
+                        drawer.mode = None
+                    toasts.show("Slice plane off")
+                elif _aperture["placing"]:
                     _aperture["placing"] = False
                     if not _aperture["active"]:
                         aperture_panel.enabled = False
@@ -613,7 +687,30 @@ def run_wgpu_app(
             elif key == glfw.KEY_F:
                 drawer.toggle("filters")
             elif key == glfw.KEY_M and (mods & glfw.MOD_CONTROL):
-                _export_fits_map()
+                if _slice["active"] and slice_renderer.grid is not None:
+                    from .wgpu_renderer import slice_grid_to_fits
+                    from .physics import field_unit_label
+
+                    geom = _slice.get("_geom")
+                    center_kpc = (geom[0] * units.length_to_kpc
+                                  if geom else np.zeros(3))
+                    field = (_state["_wa_data_field"]
+                             if _state["_render_mode_name"] in
+                             ("WeightedAverage", "WeightedVariance")
+                             else _state["_sd_field"])
+                    out = os.path.join(
+                        screenshot_dir or ".",
+                        f"vizmo_slice_{field}_{int(time.time())}.fits")
+                    slice_grid_to_fits(
+                        slice_renderer.grid, center_kpc,
+                        _slice["size_kpc"], out, field=field,
+                        unit=field_unit_label(field),
+                        normal_label=_slice["normal_label"])
+                    print(f"  Slice FITS: {out}")
+                    toasts.show(
+                        f"Slice FITS: {os.path.basename(out)}", "ok")
+                else:
+                    _export_fits_map()
             elif key == glfw.KEY_M:
                 if mods & glfw.MOD_SHIFT:
                     # Shift+M: drop the aperture, back to global scope.
@@ -655,6 +752,18 @@ def run_wgpu_app(
                     _series["pending"] = new_i
                 else:
                     toasts.show("End of series", "warn")
+            elif key == glfw.KEY_Z and (mods & glfw.MOD_SHIFT):
+                if not _slice["active"]:
+                    _slice["active"] = True
+                    drawer.enabled = True
+                    drawer.mode = "slice"
+                else:
+                    _slice["normal_idx"] = ((_slice["normal_idx"] + 1)
+                                            % len(_SLICE_NORMALS))
+                _recompute_slice()
+                toasts.show(
+                    f"Slice plane: normal {_slice['normal_label']} "
+                    f"(Shift+Z cycles, Esc closes)")
             elif key == glfw.KEY_F9:
                 vis = not scale_bar.enabled
                 scale_bar.enabled = vis
@@ -959,6 +1068,33 @@ def run_wgpu_app(
                     scale_bar._last_key = None
                     app_proxy._apply_render_mode(auto_range=False)
                     toasts.show("View center moved to picked particle", "ok")
+                elif dr_action in ("slice_axis", "slice_back", "slice_fwd",
+                                   "slice_op_down", "slice_op_up",
+                                   "slice_res"):
+                    if dr_action == "slice_axis":
+                        _slice["normal_idx"] = ((_slice["normal_idx"] + 1)
+                                                % len(_SLICE_NORMALS))
+                    elif dr_action == "slice_back":
+                        geom = _slice.get("_geom")
+                        half = geom[2] if geom else camera.speed
+                        _slice["offset"] -= 0.05 * 2 * half
+                    elif dr_action == "slice_fwd":
+                        geom = _slice.get("_geom")
+                        half = geom[2] if geom else camera.speed
+                        _slice["offset"] += 0.05 * 2 * half
+                    elif dr_action == "slice_op_down":
+                        _slice["opacity"] = max(0.0,
+                                                _slice["opacity"] - 0.1)
+                    elif dr_action == "slice_op_up":
+                        _slice["opacity"] = min(1.0,
+                                                _slice["opacity"] + 0.1)
+                    elif dr_action == "slice_res":
+                        cyc = [128, 256, 512, 1024]
+                        _slice["res"] = cyc[(cyc.index(_slice["res"]) + 1)
+                                            % len(cyc)]
+                    if not _slice["active"]:
+                        _slice["active"] = True
+                    _recompute_slice()
                 elif dr_action == "sightline_csv":
                     if _sightlines["list"]:
                         import os as _os
@@ -1076,7 +1212,25 @@ def run_wgpu_app(
                 return
         camera.on_mouse_button(button, action)
 
+    _slice_drag = {"last_y": None}
+
     def cursor_callback(win, x, y):
+        # Ctrl+LMB drag in slice mode: translate the plane along its
+        # normal (world step scaled to the slice size per pixel).
+        ctrl = (glfw.get_key(win, glfw.KEY_LEFT_CONTROL) == glfw.PRESS
+                or glfw.get_key(win, glfw.KEY_RIGHT_CONTROL) == glfw.PRESS)
+        lmb = glfw.get_mouse_button(
+            win, glfw.MOUSE_BUTTON_LEFT) == glfw.PRESS
+        if _slice["active"] and ctrl and lmb:
+            if _slice_drag["last_y"] is not None:
+                dy = y - _slice_drag["last_y"]
+                geom = _slice.get("_geom")
+                half = geom[2] if geom else camera.speed
+                _slice["offset"] += -dy * (2.0 * half) / 600.0
+                _recompute_slice()
+            _slice_drag["last_y"] = y
+            return
+        _slice_drag["last_y"] = None
         camera.on_cursor(x, y)
 
     def scroll_callback(win, xoffset, yoffset):
@@ -2340,6 +2494,27 @@ def run_wgpu_app(
                     aperture_panel.render_to_pass(rpass)
                 if sightline_overlay.enabled and _sightlines["list"]:
                     sightline_overlay.render_to_pass(rpass)
+                if _slice["active"] and slice_renderer.grid is not None:
+                    geom = _slice.get("_geom")
+                    if geom is not None:
+                        c0, nrm, half = geom
+                        from .wgpu_renderer import plane_basis as _pb
+
+                        e1, e2, _ = _pb(nrm)
+                        corners = []
+                        ok_all = True
+                        for su, sv in ((-1, -1), (1, -1), (1, 1),
+                                       (-1, 1)):
+                            wpt = c0 + su * half * e1 + sv * half * e2
+                            res_p = _world_to_screen(wpt, fb_w, fb_h)
+                            if res_p is None:
+                                ok_all = False
+                                break
+                            corners.append(
+                                (res_p[0] / fb_w * 2 - 1.0,
+                                 1.0 - res_p[1] / fb_h * 2))
+                        if ok_all:
+                            slice_renderer.render_to_pass(rpass, corners)
                 if sink_panel.enabled:
                     sink_panel.render_to_pass(rpass)
                 if overlay.enabled:

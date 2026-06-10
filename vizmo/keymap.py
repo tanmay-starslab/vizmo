@@ -29,6 +29,7 @@ KEYBINDINGS = [
     ("J", "Toggle radial profile about the view center"),
     ("U", "Toggle region statistics (sphere about center)"),
     ("Shift+K", "Toggle power spectrum P(k) panel"),
+    ("Shift+Z", "Slice plane: activate / cycle normal (Ctrl+drag moves)"),
     ("Tab (aperture)", "Cycle aperture shape (sphere/cyl/box/slab/cone/ellipsoid)"),
     ("M", "Aperture mode: click=center, scroll=size, M again=set"),
     ("Shift+M", "Clear aperture (analysis back to global scope)"),

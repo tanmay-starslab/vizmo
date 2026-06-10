@@ -1008,7 +1008,8 @@ class AnalysisDrawer(Panel):
                   "profile": "Radial profile", "stats": "Region statistics",
                   "spectrum": "Power spectrum",
                   "orbit": "Orbit integration",
-                  "sightline": "Absorption sightlines"}
+                  "sightline": "Absorption sightlines",
+                  "slice": "Slice plane"}
         title = titles.get(self.mode, "")
 
         plot_img, caption = (None, "")
@@ -1040,6 +1041,20 @@ class AnalysisDrawer(Panel):
             ]
             if props.get("circularity") is not None:
                 rows.append(("circularity", f"{props['circularity']:+.2f}"))
+        elif self.mode == "slice":
+            st = getattr(self, "slice_state", None)
+            if st is None or not st.get("active"):
+                rows = [("Slice inactive", "Shift+Z to activate")]
+            else:
+                rows = [
+                    ("Normal", st.get("normal_label", "?")),
+                    ("Offset", f"{st.get('offset_kpc', 0.0):+,.1f} kpc"),
+                    ("Size", f"{st.get('size_kpc', 0.0):,.0f} kpc"),
+                    ("Resolution", f"{st.get('res', 512)}^2"),
+                    ("Opacity", f"{st.get('opacity', 0.85):.2f}"),
+                    ("Backend", "GPU" if st.get("used_gpu") else "CPU"),
+                    ("Drag", "Ctrl+drag moves along normal"),
+                ]
         elif self.mode == "sightline":
             sls = getattr(self, "sightlines", [])
             if not sls:
@@ -1227,6 +1242,14 @@ class AnalysisDrawer(Panel):
             bx = fbtn(bx, "Compute", "orbit_compute")
             bx = fbtn(bx, "CSV", "orbit_csv")
             bx = fbtn(bx, "Stream", "orbit_stream")
+        elif self.mode == "slice":
+            bx = M
+            bx = fbtn(bx, "Axis", "slice_axis")
+            bx = fbtn(bx, "-", "slice_back")
+            bx = fbtn(bx, "+", "slice_fwd")
+            bx = fbtn(bx, "Op-", "slice_op_down")
+            bx = fbtn(bx, "Op+", "slice_op_up")
+            bx = fbtn(bx, "Res", "slice_res")
         elif self.mode == "sightline":
             bx = M
             bx = fbtn(bx, "CSV", "sightline_csv")
