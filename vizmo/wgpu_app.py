@@ -240,7 +240,62 @@ def run_wgpu_app(
     # Deferred Shift+click pick: the KD-tree build can take seconds on
     # a 10M+ particle pool, so the click only queues the ray and shows
     # a toast; the main loop runs the pick one frame later.
-    _pending_pick = {"ray": None, "frames": 0}
+    # `purpose` is "inspect" (open inspector) or "aperture" (place the
+    # analysis-aperture center).
+    _pending_pick = {"ray": None, "frames": 0, "purpose": "inspect"}
+
+    # Analysis aperture: a world-space sphere the user places with the
+    # mouse (M key). While `placing`, clicks move the center and scroll
+    # resizes; M again submits — the center is then refined inside the
+    # sphere (densest by default) and all drawer tools compute within it.
+    from .wgpu_overlay import WGPUApertureOverlay
+
+    aperture_panel = WGPUApertureOverlay(device, present_format)
+    _aperture = {
+        "active": False,      # submitted and in use
+        "placing": False,     # interactive placement in progress
+        "center": None,       # (3,) code units
+        "radius": None,       # code units
+        "center_mode": 0,     # index into analysis.CENTER_MODES
+    }
+
+    def _focus_center():
+        """Center used by orbit / N / F2-F4: aperture when active."""
+        if _aperture["active"] and _aperture["center"] is not None:
+            return np.asarray(_aperture["center"], dtype=np.float64)
+        return data.get_view_center()
+
+    def _world_to_screen(p, fbw, fbh):
+        """Project a world point to framebuffer px. None when behind."""
+        rel = np.asarray(p, dtype=np.float64) - camera.position
+        zf = float(rel @ camera.forward)
+        if zf <= 1e-12:
+            return None
+        xr = float(rel @ camera.right)
+        yu = float(rel @ camera.up)
+        tan_half = np.tan(np.radians(camera.fov) / 2.0)
+        nx = xr / (zf * tan_half * camera.aspect)
+        ny = yu / (zf * tan_half)
+        return ((nx + 1.0) * 0.5 * fbw, (1.0 - ny) * 0.5 * fbh, zf)
+
+    def _submit_aperture():
+        """Refine the center inside the sphere and hand it to the drawer."""
+        from .analysis import CENTER_MODES, find_center_in_region
+
+        mode_name = CENTER_MODES[_aperture["center_mode"] % len(CENTER_MODES)]
+        try:
+            refined = find_center_in_region(
+                data, _aperture["center"], _aperture["radius"], mode_name)
+        except Exception as e:
+            toasts.show(f"Center refine failed: {e}", "error")
+            refined = np.asarray(_aperture["center"], dtype=np.float64)
+        _aperture["center"] = refined
+        _aperture["placing"] = False
+        _aperture["active"] = True
+        r_kpc = _aperture["radius"] * units.length_to_kpc
+        drawer.set_scope(refined, r_kpc, mode_name)
+        toasts.show(
+            f"Aperture set: R={r_kpc:.0f} kpc, center={mode_name}", "ok")
     _timings = {"cull": 0, "upload": 0, "render": 0}
     _last_message = ""
     _render_mode = RenderMode.surface_density("Masses")
@@ -351,9 +406,14 @@ def run_wgpu_app(
             dirty = True
         if action == glfw.PRESS:
             if key == glfw.KEY_ESCAPE:
-                # Esc closes the help panel / drawer first; quits only
-                # when no panel is in the way.
-                if help_panel.enabled:
+                # Esc cancels aperture placement, then closes panels;
+                # quits only when nothing is in the way.
+                if _aperture["placing"]:
+                    _aperture["placing"] = False
+                    if not _aperture["active"]:
+                        aperture_panel.enabled = False
+                    toasts.show("Aperture placement cancelled")
+                elif help_panel.enabled:
                     help_panel.enabled = False
                 elif drawer.enabled:
                     drawer.enabled = False
@@ -433,6 +493,31 @@ def run_wgpu_app(
                 drawer.toggle("stats")
             elif key == glfw.KEY_I:
                 drawer.toggle("inspector")
+            elif key == glfw.KEY_M:
+                if mods & glfw.MOD_SHIFT:
+                    # Shift+M: drop the aperture, back to global scope.
+                    _aperture["active"] = False
+                    _aperture["placing"] = False
+                    aperture_panel.enabled = False
+                    drawer.clear_scope()
+                    toasts.show("Aperture cleared (global scope)")
+                elif _aperture["placing"]:
+                    if _aperture["center"] is None:
+                        toasts.show("Click to place the center first", "warn")
+                    else:
+                        _submit_aperture()
+                else:
+                    _aperture["placing"] = True
+                    if _aperture["center"] is None:
+                        _aperture["center"] = data.get_view_center().copy()
+                    if _aperture["radius"] is None:
+                        d0 = float(np.linalg.norm(
+                            camera.position - _aperture["center"]))
+                        _aperture["radius"] = max(d0 * 0.15, 1e-9)
+                    aperture_panel.enabled = True
+                    toasts.show(
+                        "Aperture: click=center, scroll=size, M=set, Esc=cancel",
+                        duration=5.0)
             elif key == glfw.KEY_F9:
                 vis = not scale_bar.enabled
                 scale_bar.enabled = vis
@@ -440,7 +525,7 @@ def run_wgpu_app(
                 gizmo.enabled = vis
                 toasts.show(f"Science chrome {'on' if vis else 'off'}")
             elif key == glfw.KEY_N:
-                center = data.get_view_center()
+                center = _focus_center()
                 if mods & glfw.MOD_SHIFT:
                     # Approach: fly to 1/3 of the current distance.
                     rel = camera.position - center
@@ -458,11 +543,11 @@ def run_wgpu_app(
                     toasts.show("Orbit off")
                 else:
                     speed_scale = -1.0 if (mods & glfw.MOD_SHIFT) else 1.0
-                    if camera.start_orbit(data.get_view_center(),
+                    if camera.start_orbit(_focus_center(),
                                           angular_speed=0.25 * speed_scale):
                         toasts.show("Orbiting view center (Y stops)", "ok")
             elif key in (glfw.KEY_F2, glfw.KEY_F3, glfw.KEY_F4):
-                center = data.get_view_center()
+                center = _focus_center()
                 d = float(np.linalg.norm(camera.position - center))
                 if d <= 0:
                     d = camera.speed * 5.0
@@ -670,6 +755,25 @@ def run_wgpu_app(
                 glfw.get_key(win, glfw.KEY_LEFT_SHIFT) == glfw.PRESS
                 or glfw.get_key(win, glfw.KEY_RIGHT_SHIFT) == glfw.PRESS
             )
+            if _aperture["placing"] and not shift_held:
+                # Aperture placement: a plain click drops the center on
+                # the particle under the cursor (mouse-look is disabled
+                # for the duration of placement).
+                fw, fh = glfw.get_framebuffer_size(win)
+                nx = 2.0 * x / max(fw, 1) - 1.0
+                ny = 1.0 - 2.0 * y / max(fh, 1)
+                tan_half = np.tan(np.radians(camera.fov) / 2.0)
+                ray = (
+                    camera.forward
+                    + nx * tan_half * camera.aspect * camera.right
+                    + ny * tan_half * camera.up
+                )
+                _pending_pick["ray"] = ray / np.linalg.norm(ray)
+                _pending_pick["frames"] = 2
+                _pending_pick["purpose"] = "aperture"
+                if getattr(data, "_pick_tree", None) is None:
+                    toasts.show("Building spatial index...", "info")
+                return
             if shift_held:
                 # Shift+click: pick the particle under the cursor. The
                 # actual KD-tree query runs from the main loop a frame
@@ -685,6 +789,7 @@ def run_wgpu_app(
                 )
                 _pending_pick["ray"] = ray / np.linalg.norm(ray)
                 _pending_pick["frames"] = 2
+                _pending_pick["purpose"] = "inspect"
                 if getattr(data, "_pick_tree", None) is None:
                     toasts.show("Building spatial index...", "info")
                 return
@@ -696,6 +801,12 @@ def run_wgpu_app(
                     scale_bar._last_key = None
                     app_proxy._apply_render_mode(auto_range=False)
                     toasts.show("View center moved to picked particle", "ok")
+                elif dr_action == "cycle_center" and _aperture["active"]:
+                    from .analysis import CENTER_MODES
+
+                    _aperture["center_mode"] = (
+                        _aperture["center_mode"] + 1) % len(CENTER_MODES)
+                    _submit_aperture()
                 return
             tb_action = toolbar.on_click(x, y)
             if tb_action:
@@ -715,11 +826,32 @@ def run_wgpu_app(
                     if tb_action == "stats":
                         drawer.refresh()
                     drawer.toggle(tb_action)
+                elif tb_action == "aperture":
+                    if _aperture["placing"]:
+                        if _aperture["center"] is not None:
+                            _submit_aperture()
+                    elif _aperture["active"]:
+                        _aperture["active"] = False
+                        aperture_panel.enabled = False
+                        drawer.clear_scope()
+                        toasts.show("Aperture cleared (global scope)")
+                    else:
+                        _aperture["placing"] = True
+                        if _aperture["center"] is None:
+                            _aperture["center"] = data.get_view_center().copy()
+                        if _aperture["radius"] is None:
+                            d0 = float(np.linalg.norm(
+                                camera.position - _aperture["center"]))
+                            _aperture["radius"] = max(d0 * 0.15, 1e-9)
+                        aperture_panel.enabled = True
+                        toasts.show(
+                            "Aperture: click=center, scroll=size, M=set, Esc=cancel",
+                            duration=5.0)
                 elif tb_action == "orbit":
                     if camera.orbit is not None:
                         camera.stop_orbit()
                         toasts.show("Orbit off")
-                    elif camera.start_orbit(data.get_view_center()):
+                    elif camera.start_orbit(_focus_center()):
                         toasts.show("Orbiting view center", "ok")
                 elif tb_action == "export_region":
                     _export_region_cutout()
@@ -742,6 +874,11 @@ def run_wgpu_app(
         idle_streak = 0
         if user_menu.on_scroll(yoffset):
             ui_dirty = True
+            return
+        # Aperture placement: scroll resizes the sphere.
+        if _aperture["placing"]:
+            _aperture["radius"] *= 1.1 ** yoffset
+            dirty = True
             return
         # Ctrl+scroll: optical zoom (FOV). Plain scroll: flight speed.
         ctrl_held = (
@@ -1132,6 +1269,9 @@ def run_wgpu_app(
                     toasts.show(f"Pick failed: {e}", "error")
                 if idx is None:
                     toasts.show("No particle under cursor", "warn")
+                elif _pending_pick["purpose"] == "aperture":
+                    _aperture["center"] = data.positions[idx].copy()
+                    toasts.show("Aperture center placed (M to set)", "ok")
                 else:
                     drawer.open_inspector(idx)
                     toasts.show(f"Picked particle {idx:,}", "ok")
@@ -1563,6 +1703,7 @@ def run_wgpu_app(
                     recording=_recording["dir"] is not None,
                     orbiting=camera.orbit is not None,
                     drawer_mode=drawer.mode if drawer.enabled else None,
+                    aperture=_aperture["active"] or _aperture["placing"],
                 )
 
                 # Science chrome (each panel dirty-checks internally)
@@ -1579,6 +1720,24 @@ def run_wgpu_app(
                 toasts.update()
                 if drawer.enabled:
                     drawer.update(data)
+
+                # Aperture sphere indicator (projected circle).
+                _aperture["visible"] = False
+                if aperture_panel.enabled and _aperture["center"] is not None:
+                    aperture_panel.set_framebuffer_size(fb_w, fb_h)
+                    res = _world_to_screen(_aperture["center"], fb_w, fb_h)
+                    if res is not None:
+                        cx_px, cy_px, zf = res
+                        tan_half = np.tan(np.radians(camera.fov) / 2.0)
+                        r_px = (_aperture["radius"] / (zf * tan_half)
+                                * fb_h / 2.0)
+                        r_kpc = _aperture["radius"] * units.length_to_kpc
+                        lbl = f"R = {r_kpc:,.3g} kpc"
+                        if _aperture["placing"]:
+                            lbl += "  (M to set)"
+                        aperture_panel.update(cx_px, cy_px, r_px, lbl,
+                                              placing=_aperture["placing"])
+                        _aperture["visible"] = True
 
                 smooth_fps_val = smooth_fps_ema if smooth_fps_ema > 0 else fps
                 # Only rebuild overlay texture at ~4Hz to avoid PIL cost every frame
@@ -1644,6 +1803,8 @@ def run_wgpu_app(
                     status_bar.render_to_pass(rpass)
                 if gizmo.enabled:
                     gizmo.render_to_pass(rpass)
+                if aperture_panel.enabled and _aperture.get("visible"):
+                    aperture_panel.render_to_pass(rpass)
                 if sink_panel.enabled:
                     sink_panel.render_to_pass(rpass)
                 if overlay.enabled:

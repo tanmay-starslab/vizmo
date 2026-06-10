@@ -25,6 +25,8 @@ KEYBINDINGS = [
     ("G", "Toggle phase diagram (mass-weighted 2D histogram)"),
     ("J", "Toggle radial profile about the view center"),
     ("U", "Toggle region statistics (sphere about center)"),
+    ("M", "Aperture mode: click=center, scroll=size, M again=set"),
+    ("Shift+M", "Clear aperture (analysis back to global scope)"),
     ("F9", "Toggle science chrome (scale bar, status bar, axes)"),
     ("1-9", "Fly to camera bookmark (eased)"),
     ("Shift+1-9", "Save camera bookmark"),

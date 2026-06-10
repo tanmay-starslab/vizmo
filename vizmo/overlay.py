@@ -985,7 +985,8 @@ class ToolbarOverlay(Panel):
         super().__init__(TOOLBAR_STYLE)
         self.enabled = True
 
-    def update(self, recording=False, orbiting=False, drawer_mode=None):
+    def update(self, recording=False, orbiting=False, drawer_mode=None,
+               aperture=False):
         if not self.enabled:
             return
         rec_label = "Stop" if recording else "Rec"
@@ -1002,6 +1003,7 @@ class ToolbarOverlay(Panel):
                 ("Phase", "phase", drawer_mode == "phase"),
                 ("Profile", "profile", drawer_mode == "profile"),
                 ("Stats", "stats", drawer_mode == "stats"),
+                ("Aperture", "aperture", aperture),
                 ("Orbit", "orbit", orbiting),
                 ("Cutout", "export_region"),
             ]),

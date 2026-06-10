@@ -374,6 +374,103 @@ class AxesGizmo(Panel):
 
 
 # ---------------------------------------------------------------------------
+# Aperture overlay
+# ---------------------------------------------------------------------------
+
+APERTURE_STYLE = PanelStyle(
+    font_size=18, line_height=26, margin=8, min_width=10,
+    bg_color=(0, 0, 0, 0),
+    text_color=(235, 238, 245, 255),
+    accent_color=(120, 200, 255, 255),
+    toggle_on_color=(120, 200, 255, 255),
+    toggle_off_color=(110, 115, 130, 255),
+    dropdown_bg=(34, 37, 50, 255),
+    dropdown_hover=(80, 100, 140, 255),
+    slider_btn=(64, 70, 88, 255),
+    position="top-left",
+    font_family="sans-serif",
+)
+
+
+class ApertureOverlay(Panel):
+    """Projected circle marking the analysis aperture sphere.
+
+    The app computes the screen-space center and pixel radius each
+    frame (perspective projection of the world-space sphere) and calls
+    update(); the panel rasterizes a ring + crosshair + radius label
+    into a texture bounding the circle. While the aperture is being
+    placed the ring renders dashed.
+    """
+
+    MAX_TEX = 2048
+
+    def __init__(self):
+        super().__init__(APERTURE_STYLE)
+        self.enabled = False
+        self._last_key = None
+        self._pos_px = (0, 0)
+
+    def _panel_origin(self, tw, th):
+        return self._pos_px
+
+    def update(self, cx_px, cy_px, radius_px, label, placing=False):
+        if not self.enabled:
+            return
+        r = float(np.clip(radius_px, 6.0, self.MAX_TEX / 2 - 4))
+        key = (int(cx_px), int(cy_px), int(r), label, placing,
+               self._fb_width, self._fb_height)
+        if key == self._last_key and self._tex is not None:
+            return
+        self._last_key = key
+
+        pad = 30 + self.style.line_height
+        size = int(2 * r) + 2 * pad
+        tw = th = min(size, self.MAX_TEX)
+        c = tw // 2
+        img = Image.new("RGBA", (tw, th), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(img)
+        col = self.style.accent_color if not placing else (255, 200, 110, 255)
+        shadow = (0, 0, 0, 150)
+
+        if placing:
+            # Dashed ring: 48 arc segments, alternating.
+            for k in range(0, 48, 2):
+                a0, a1 = k * 7.5, (k + 1) * 7.5
+                draw.arc([c - r + 1, c - r + 1, c + r - 1, c + r - 1],
+                         a0, a1, fill=shadow, width=4)
+                draw.arc([c - r, c - r, c + r, c + r], a0, a1, fill=col, width=3)
+        else:
+            draw.ellipse([c - r + 1, c - r + 1, c + r - 1, c + r - 1],
+                         outline=shadow, width=4)
+            draw.ellipse([c - r, c - r, c + r, c + r], outline=col, width=3)
+        # Center crosshair
+        for dx, dy, col2 in ((1, 1, shadow), (0, 0, col)):
+            draw.line([(c - 9 + dx, c + dy), (c + 9 + dx, c + dy)],
+                      fill=col2, width=2)
+            draw.line([(c + dx, c - 9 + dy), (c + dx, c + 9 + dy)],
+                      fill=col2, width=2)
+        if label:
+            bb = draw.textbbox((0, 0), label, font=self._font)
+            lx = c - (bb[2] - bb[0]) // 2
+            ly = int(c - r) - self.style.line_height - 2
+            if ly < 0:
+                ly = min(int(c + r) + 6, th - self.style.line_height)
+            draw.text((lx + 1, ly + 1), label, fill=shadow, font=self._font)
+            draw.text((lx, ly), label, fill=self.style.text_color,
+                      font=self._font)
+
+        self._pos_px = (int(cx_px - tw // 2), int(cy_px - th // 2))
+        self._panel_w, self._panel_h = tw, th
+        self._panel_x, self._panel_y = self._pos_px
+        self._upload_panel(tw, th, img.tobytes())
+
+    def render(self):
+        if not self.enabled:
+            return
+        super().render()
+
+
+# ---------------------------------------------------------------------------
 # Analysis drawer
 # ---------------------------------------------------------------------------
 
@@ -410,7 +507,8 @@ class AnalysisDrawer(Panel):
     until refresh() or a mode change.
     """
 
-    PROFILE_FIELDS = ["Density", "Temperature", "RadialVelocity",
+    PROFILE_FIELDS = ["Density", "RotationCurve", "VelocityDispersion3D",
+                      "EnclosedMass", "Temperature", "RadialVelocity",
                       "MetallicityZsun", "Pressure", "VelocityMagnitude"]
 
     def __init__(self):
@@ -424,6 +522,30 @@ class AnalysisDrawer(Panel):
         self._picked_index = None
         self._cache = {}
         self._last_key = None
+        # Analysis scope: None = global, else dict(center=(3,) code
+        # units, radius_kpc=float, center_mode=str). Set by the
+        # aperture tool; every tool computes within it when use_scope.
+        self.scope = None
+        self.use_scope = True
+
+    def set_scope(self, center, radius_kpc, center_mode="densest"):
+        self.scope = {
+            "center": np.asarray(center, dtype=np.float64),
+            "radius_kpc": float(radius_kpc),
+            "center_mode": center_mode,
+        }
+        self.use_scope = True
+        self.refresh()
+
+    def clear_scope(self):
+        self.scope = None
+        self.refresh()
+
+    def _active_scope(self):
+        """(center, radius_kpc) or (None, None) for global."""
+        if self.scope is not None and self.use_scope:
+            return self.scope["center"], self.scope["radius_kpc"]
+        return None, None
 
     # -- state management ---------------------------------------------------
 
@@ -465,13 +587,17 @@ class AnalysisDrawer(Panel):
         from . import analysis
 
         scale = max(0.6, self._dpi_scale)
+        sc_center, sc_radius = self._active_scope()
+        sc_key = (None if sc_center is None
+                  else (tuple(np.round(sc_center, 3)), round(sc_radius, 3)))
         if self.mode == "phase":
             presets = self._phase_presets(data)
             self._phase_idx %= len(presets)
             xf, yf = presets[self._phase_idx]
-            key = ("phase", xf, yf, data.n_particles)
+            key = ("phase", xf, yf, data.n_particles, sc_key)
             if key not in self._cache:
-                ph = analysis.phase_histogram(data, xf, yf)
+                ph = analysis.phase_histogram(
+                    data, xf, yf, center=sc_center, radius_kpc=sc_radius)
                 self._cache[key] = self._render_phase(ph, scale)
             return self._cache[key], f"{xf} vs {yf}"
 
@@ -479,9 +605,10 @@ class AnalysisDrawer(Panel):
             fields = self._profile_fields(data)
             self._profile_idx %= len(fields)
             f = fields[self._profile_idx]
-            key = ("profile", f, data.n_particles)
+            key = ("profile", f, data.n_particles, sc_key)
             if key not in self._cache:
-                r, prof, unit = analysis.radial_profile(data, f)
+                r, prof, unit = analysis.radial_profile(
+                    data, f, center=sc_center, r_max_kpc=sc_radius)
                 self._cache[key] = self._render_profile(r, prof, unit, f, scale)
             return self._cache[key], f"{f}(r)"
         return None, ""
@@ -564,15 +691,25 @@ class AnalysisDrawer(Panel):
                         data, self._picked_index)
                 rows = self._cache["inspector"]
         elif self.mode == "stats":
-            key = ("stats", self._stats_radius_kpc, data.n_particles)
+            sc_center, sc_radius = self._active_scope()
+            r_use = sc_radius if sc_radius is not None else self._stats_radius_kpc
+            sck = (None if sc_center is None
+                   else tuple(np.round(sc_center, 3)))
+            key = ("stats", r_use, data.n_particles, sck)
             if key not in self._cache:
                 self._cache[key] = analysis.region_stats(
-                    data, radius_kpc=self._stats_radius_kpc)
+                    data, center=sc_center, radius_kpc=r_use)
             rows, used_r = self._cache[key]
-            self._stats_radius_kpc = used_r
+            if sc_radius is None:
+                self._stats_radius_kpc = used_r
 
+        scope_tag = ""
+        if self.scope is not None:
+            scope_tag = (f"aperture R={self.scope['radius_kpc']:.0f} kpc "
+                         f"[{self.scope['center_mode']}]"
+                         if self.use_scope else "global")
         key = (self.mode, caption, tuple(rows), self._fb_width,
-               self._fb_height, id(plot_img))
+               self._fb_height, id(plot_img), scope_tag)
         if key == self._last_key and self._tex is not None:
             return
         self._last_key = key
@@ -593,7 +730,8 @@ class AnalysisDrawer(Panel):
         body_h = (plot_img.height + 8 if plot_img is not None
                   else LH * max(len(rows), 1) + 8)
         extra_h = LH if self.mode == "inspector" and self._picked_index is not None else 0
-        th = header_h + body_h + footer_h + extra_h + M
+        scope_h = LH + 4 if self.scope is not None else 0
+        th = header_h + body_h + footer_h + extra_h + scope_h + M
 
         img = Image.new("RGBA", (tw, th), (0, 0, 0, 0))
         draw = ImageDraw.Draw(img)
@@ -640,6 +778,33 @@ class AnalysisDrawer(Panel):
                       font=self._font)
             self._buttons.append((bx0, y, bx0 + bw, y + LH - 2, "center_on_pick"))
             y += LH
+
+        # Scope row: aperture/global toggle + center-mode cycling.
+        if self.scope is not None:
+            bx = M
+            lbl = "Aperture" if self.use_scope else "Global"
+            bb = dummy.textbbox((0, 0), lbl, font=self._font)
+            bw = bb[2] - bb[0] + 20
+            fill = (40, 62, 90, 255) if self.use_scope else s.slider_btn
+            _rounded(draw, [(bx, y + 2), (bx + bw, y + LH - 2)], 8,
+                     fill=fill, outline=(255, 255, 255, 45))
+            draw.text((bx + 10, y), lbl, fill=s.text_color, font=self._font)
+            self._buttons.append((bx, y + 2, bx + bw, y + LH - 2, "toggle_scope"))
+            bx += bw + 8
+            if self.use_scope:
+                lbl2 = self.scope["center_mode"]
+                bb = dummy.textbbox((0, 0), lbl2, font=self._font)
+                bw2 = bb[2] - bb[0] + 20
+                _rounded(draw, [(bx, y + 2), (bx + bw2, y + LH - 2)], 8,
+                         fill=s.slider_btn, outline=(255, 255, 255, 45))
+                draw.text((bx + 10, y), lbl2, fill=s.text_color, font=self._font)
+                self._buttons.append((bx, y + 2, bx + bw2, y + LH - 2,
+                                      "cycle_center"))
+                bx += bw2 + 8
+                draw.text((bx + 4, y + 1),
+                          f"R={self.scope['radius_kpc']:.0f} kpc",
+                          fill=(168, 174, 188, 255), font=self._font)
+            y += LH + 4
 
         # Footer controls
         if self.mode in ("phase", "profile"):
@@ -700,10 +865,18 @@ class AnalysisDrawer(Panel):
                     return True
                 if action == "r_half":
                     self._stats_radius_kpc = (self._stats_radius_kpc or 100.0) / 2.0
+                    if self.scope is not None and self.use_scope:
+                        self.scope["radius_kpc"] /= 2.0
                     self.refresh()
                     return True
                 if action == "r_double":
                     self._stats_radius_kpc = (self._stats_radius_kpc or 100.0) * 2.0
+                    if self.scope is not None and self.use_scope:
+                        self.scope["radius_kpc"] *= 2.0
+                    self.refresh()
+                    return True
+                if action == "toggle_scope":
+                    self.use_scope = not self.use_scope
                     self.refresh()
                     return True
                 return action

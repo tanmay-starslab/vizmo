@@ -16,6 +16,7 @@ from .science_panels import (
     ToastOverlay,
     AxesGizmo,
     AnalysisDrawer,
+    ApertureOverlay,
 )
 
 SHADER_DIR = Path(__file__).parent / "shaders"
@@ -200,6 +201,12 @@ class WGPUAxesGizmo(_WGPUPanelMixin, AxesGizmo):
 class WGPUAnalysisDrawer(_WGPUPanelMixin, AnalysisDrawer):
     def __init__(self, device, present_format):
         AnalysisDrawer.__init__(self)
+        self._init_wgpu(device, present_format)
+
+
+class WGPUApertureOverlay(_WGPUPanelMixin, ApertureOverlay):
+    def __init__(self, device, present_format):
+        ApertureOverlay.__init__(self)
         self._init_wgpu(device, present_format)
 
 
