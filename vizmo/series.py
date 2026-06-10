@@ -38,7 +38,15 @@ def _cosmic_time_gyr(units: UnitSystem) -> float:
 
 
 def _snap_num_from_name(name: str) -> int:
-    m = re.findall(r"(\d+)", os.path.basename(name))
+    """Snapshot number from a filename like snapshot_063.0.hdf5 -> 63.
+
+    Extensions (and the multi-part .N suffix) are stripped first so the
+    '5' in '.hdf5' can never be mistaken for the snapshot number.
+    """
+    base = os.path.basename(name)
+    base = re.sub(r"\.(hdf5|h5)$", "", base)
+    base = re.sub(r"\.\d+$", "", base)  # multi-part suffix
+    m = re.findall(r"(\d+)", base)
     return int(m[-1]) if m else -1
 
 
