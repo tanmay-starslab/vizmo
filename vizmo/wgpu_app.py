@@ -193,12 +193,13 @@ def run_wgpu_app(
     glfw.set_window_title(window, "vizmo [wgpu] | Initializing...")
 
     # UI overlays
-    from .wgpu_overlay import WGPUDevOverlay, WGPUSinkOverlay, WGPUUserMenu
+    from .wgpu_overlay import WGPUDevOverlay, WGPUSinkOverlay, WGPUUserMenu, WGPUHelpOverlay
 
     overlay = WGPUDevOverlay(device, present_format)
     sink_panel = WGPUSinkOverlay(device, present_format)
     sink_panel.enabled = data.n_stars > 0
     user_menu = WGPUUserMenu(device, present_format)
+    help_panel = WGPUHelpOverlay(device, present_format)
     _timings = {"cull": 0, "upload": 0, "render": 0}
     _last_message = ""
     _render_mode = RenderMode.surface_density("Masses")
@@ -291,7 +292,12 @@ def run_wgpu_app(
             dirty = True
         if action == glfw.PRESS:
             if key == glfw.KEY_ESCAPE:
-                glfw.set_window_should_close(win, True)
+                # Esc closes the help panel first; quits only when no
+                # panel is in the way.
+                if help_panel.enabled:
+                    help_panel.enabled = False
+                else:
+                    glfw.set_window_should_close(win, True)
             elif key == glfw.KEY_R:
                 if _state["_composite"]:
                     _auto_range_composite_slot(1, "Color")
@@ -333,7 +339,9 @@ def run_wgpu_app(
                 _state["_cmap_idx"] = _cmap_idx
             elif key == glfw.KEY_P:
                 _take_screenshot()
-            elif key == glfw.KEY_F1 or key == glfw.KEY_BACKSLASH:
+            elif key == glfw.KEY_F1 or key == glfw.KEY_H:
+                help_panel.enabled = not help_panel.enabled
+            elif key == glfw.KEY_BACKSLASH:
                 overlay.enabled = not overlay.enabled
             elif key == glfw.KEY_K:
                 sink_panel.enabled = not sink_panel.enabled
@@ -515,6 +523,8 @@ def run_wgpu_app(
         idle_streak = 0
         if button == glfw.MOUSE_BUTTON_LEFT and action == glfw.PRESS:
             x, y = _cursor_to_fb(win)
+            if help_panel.enabled and help_panel.on_click(x, y):
+                return
             if user_menu.on_click(x, y, app_proxy):
                 return
             if sink_panel.enabled and sink_panel.on_click(x, y, renderer):
@@ -770,7 +780,7 @@ def run_wgpu_app(
             renderer.screenshot(path, fb_w_, fb_h_, camera)
         return os.path.abspath(path)
 
-    print("vizmo [wgpu] running. WASD=move, mouse=look, ESC=quit, R=auto-range, P=screenshot.")
+    print("vizmo [wgpu] running. WASD=move, mouse=look, F1/H=help, ESC=quit, R=auto-range, P=screenshot.")
 
     while not glfw.window_should_close(window):
         now = time.perf_counter()
@@ -1204,6 +1214,7 @@ def run_wgpu_app(
                 overlay.set_framebuffer_size(fb_w, fb_h)
                 sink_panel.set_framebuffer_size(fb_w, fb_h)
                 user_menu.set_framebuffer_size(fb_w, fb_h)
+                help_panel.set_framebuffer_size(fb_w, fb_h)
 
                 smooth_fps_val = smooth_fps_ema if smooth_fps_ema > 0 else fps
                 # Only rebuild overlay texture at ~4Hz to avoid PIL cost every frame
@@ -1227,6 +1238,8 @@ def run_wgpu_app(
                     overlay.enabled = was_enabled
                 if sink_panel.enabled:
                     sink_panel.update(renderer)
+                if help_panel.enabled:
+                    help_panel.update()
                 user_menu.update(
                     renderer,
                     AVAILABLE_COLORMAPS[_state["_cmap_idx"]],
@@ -1262,6 +1275,8 @@ def run_wgpu_app(
                     sink_panel.render_to_pass(rpass)
                 if overlay.enabled:
                     overlay.render_to_pass(rpass)
+                if help_panel.enabled:
+                    help_panel.render_to_pass(rpass)
                 rpass.end()
             except Exception:
                 import traceback

@@ -66,6 +66,19 @@ SINK_STYLE = PanelStyle(
     position="top-right",
 )
 
+HELP_STYLE = PanelStyle(
+    font_size=18, line_height=26, margin=14, min_width=420,
+    bg_color=(12, 14, 22, 235),
+    text_color=(225, 228, 235, 255),
+    accent_color=(120, 190, 255, 255),
+    toggle_on_color=(120, 190, 255, 255),
+    toggle_off_color=(150, 150, 160, 255),
+    dropdown_bg=(30, 30, 40, 255),
+    dropdown_hover=(80, 100, 140, 255),
+    slider_btn=(70, 75, 90, 255),
+    position="center",
+)
+
 USER_STYLE = PanelStyle(
     font_size=28, line_height=37, margin=13, min_width=267,
     bg_color=(15, 15, 25, 100),
@@ -157,9 +170,17 @@ class Panel:
         dummy = Image.new("RGBA", (1, 1))
         draw = ImageDraw.Draw(dummy)
         max_w = s.min_width
+        kv_key_w = 0
+        for item in items:
+            if item[0] == "kv":
+                bbox = draw.textbbox((0, 0), item[1], font=self._font)
+                kv_key_w = max(kv_key_w, bbox[2] - bbox[0])
         for item in items:
             t = item[0]
-            if t in ("text", "field"):
+            if t == "kv":
+                bbox = draw.textbbox((0, 0), item[2], font=self._font)
+                max_w = max(max_w, kv_key_w + 24 + bbox[2] - bbox[0] + M * 2)
+            elif t in ("text", "field"):
                 label = f"{item[1]}: {item[2]}" if len(item) > 2 else item[1]
                 bbox = draw.textbbox((0, 0), label, font=self._font)
                 max_w = max(max_w, bbox[2] - bbox[0] + M * 4)
@@ -219,6 +240,12 @@ class Panel:
 
             if t == "text":
                 draw.text((M, y), item[1], fill=s.text_color, font=self._font)
+                y += LH
+
+            elif t == "kv":
+                # Two-column row: key (accent) | description (text color).
+                draw.text((M, y), item[1], fill=s.accent_color, font=self._font)
+                draw.text((M + kv_key_w + 24, y), item[2], fill=s.text_color, font=self._font)
                 y += LH
 
             elif t == "button":
@@ -343,6 +370,9 @@ class Panel:
         if s.position == "top-right":
             self._panel_x = fb_w - tw - 10
             self._panel_y = 10
+        elif s.position == "center":
+            self._panel_x = (fb_w - tw) // 2
+            self._panel_y = (fb_h - th) // 2
         else:
             self._panel_x = 10
             self._panel_y = fb_h - th - 10
@@ -822,6 +852,39 @@ class SinkOverlay(Panel):
                 pass
         self._editing = None
         self._edit_buffer = ""
+
+
+class HelpOverlay(Panel):
+    """Centered keybinding cheatsheet, toggled with F1 or H."""
+
+    def __init__(self):
+        super().__init__(HELP_STYLE)
+        self.enabled = False
+
+    def update(self):
+        if not self.enabled:
+            return
+        from .keymap import KEYBINDINGS
+
+        items = [("text", "vizmo controls"), ("text", "")]
+        items += [("kv", k, desc) for k, desc in KEYBINDINGS]
+        items += [("text", ""), ("text", "F1 / H / Esc to close")]
+        self.render_panel(items)
+
+    def render(self):
+        if not self.enabled:
+            return
+        super().render()
+
+    def on_click(self, x, y, _renderer=None):
+        """Any click inside the panel closes it."""
+        if not self.enabled:
+            return False
+        hit = self._hit_test(x, y)
+        if hit is None:
+            return False
+        self.enabled = False
+        return True
 
 
 class UserMenu(Panel):
