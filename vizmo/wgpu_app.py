@@ -381,6 +381,159 @@ def run_wgpu_app(
               "right": RenderState(colormap="viridis"),
               "snapshot2": None}
 
+    # Streamlines (5.C) + field-line arrows (5.D) + volume (5.E).
+    from .wgpu_renderer import (StreamlineRenderer, ArrowRenderer,
+                                VolumeRenderer, integrate_streamlines,
+                                fibonacci_sphere)
+
+    stream_renderer = StreamlineRenderer(device, present_format)
+    arrow_renderer = ArrowRenderer(device, present_format)
+    volume_renderer = VolumeRenderer(device, present_format)
+    _stream = {"n_seeds": 256, "step_mult": 1.0, "max_steps": 200,
+               "field": "Velocities", "color_by": "|v|",
+               "surface": False, "visible": False, "busy": False,
+               "n_lines": 0}
+    _volume = {"res": 128, "step_mult": 1.0, "mip": False,
+               "field": "Masses", "used_gpu": False, "n_tf": 3}
+    drawer.stream_state = _stream
+    drawer.volume_state = _volume
+
+    def _stream_compute():
+        import threading
+
+        if _stream["busy"]:
+            return
+        if _stream["field"] not in data.available_vector_fields():
+            toasts.show(f"No vector field {_stream['field']}", "warn")
+            return
+        center = _focus_center()
+        d_cam = float(np.linalg.norm(camera.position - center))
+        radius = (drawer.scope["radius_kpc"] / units.length_to_kpc
+                  if (drawer.scope and drawer.use_scope)
+                  else d_cam * 0.5)
+        pos = data.positions
+        vec = np.asarray(data.get_vector_field(_stream["field"]),
+                         dtype=np.float64)
+        h = data.hsml
+        step = float(np.median(h)) * 0.5 * _stream["step_mult"]
+        n = _stream["n_seeds"]
+        if _stream["surface"]:
+            seeds = fibonacci_sphere(n, center, radius)
+        else:
+            rng = np.random.default_rng(0)
+            d3 = rng.standard_normal((n, 3))
+            d3 /= np.linalg.norm(d3, axis=1)[:, None]
+            seeds = center + radius * rng.random((n, 1)) ** (1 / 3) * d3
+        _stream["busy"] = True
+        toasts.show(f"Integrating {n} streamlines...", "info")
+
+        def work():
+            try:
+                # Subsample the interpolation pool for tractable KD
+                # queries on 10M+ snapshots.
+                np_pool = len(pos)
+                if np_pool > 2_000_000:
+                    rng2 = np.random.default_rng(1)
+                    sub = rng2.choice(np_pool, 2_000_000, replace=False)
+                else:
+                    sub = slice(None)
+                traces = integrate_streamlines(
+                    pos[sub], vec[sub], h[sub], None, seeds, step,
+                    max_steps=_stream["max_steps"],
+                    bounds=(center, radius))
+                vals = np.concatenate(
+                    [t["values"] for t in traces if len(t["values"])])
+                pos_v = vals[vals > 0]
+                vmin = (np.log10(np.percentile(pos_v, 5))
+                        if pos_v.size else 0.0)
+                vmax = (np.log10(np.percentile(pos_v, 99))
+                        if pos_v.size else 1.0)
+                from .colormaps import colormap_to_texture_data as _ctd
+
+                lut = _ctd(AVAILABLE_COLORMAPS[_state["_cmap_idx"]])
+                stream_renderer.set_lines(traces, lut, vmin, vmax)
+                _stream["n_lines"] = len(stream_renderer.lines)
+                _stream["visible"] = True
+                toasts.show(
+                    f"Streamlines: {_stream['n_lines']} lines", "ok")
+            except Exception as e:
+                toasts.show(f"Streamlines failed: {e}", "error")
+            finally:
+                _stream["busy"] = False
+                drawer.refresh()
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _arrows_compute():
+        if "MagneticField" not in data.available_vector_fields():
+            toasts.show("No MagneticField in selection", "warn")
+            return
+        center = _focus_center()
+        d_cam = float(np.linalg.norm(camera.position - center))
+        radius = d_cam * 0.5
+        rel = np.linalg.norm(data.positions - center[None, :], axis=1)
+        keep = np.flatnonzero(rel < radius)
+        if keep.size == 0:
+            toasts.show("No particles in range", "warn")
+            return
+        b = np.asarray(data.get_vector_field("MagneticField"),
+                       dtype=np.float64)[keep]
+        bmag = np.linalg.norm(b, axis=1)
+        arrow_len = radius * 0.04
+        with np.errstate(invalid="ignore", divide="ignore"):
+            dirs = np.where(bmag[:, None] > 0, b / bmag[:, None], 0.0)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            lb = np.log10(np.where(bmag > 0, bmag, np.nan))
+        fin = lb[np.isfinite(lb)]
+        lo, hi = ((np.percentile(fin, 5), np.percentile(fin, 99))
+                  if fin.size else (0, 1))
+        x = np.clip(np.nan_to_num((lb - lo) / max(hi - lo, 1e-30)),
+                    0, 1)
+        from .colormaps import colormap_to_texture_data as _ctd
+
+        lut = _ctd(AVAILABLE_COLORMAPS[_state["_cmap_idx"]])
+        cols = lut[(x * 255).astype(np.uint8)].astype(np.float32) / 255
+        cols[:, 3] = 0.85
+        scale = arrow_len * (0.4 + 0.6 * x)
+        arrow_renderer.set_arrows(data.positions[keep],
+                                  dirs * scale[:, None], cols,
+                                  arrow_len)
+        toasts.show(
+            f"B-field arrows: {arrow_renderer.n_instances}", "ok")
+
+    def _volume_compute():
+        import threading
+
+        center = _focus_center()
+        d_cam = float(np.linalg.norm(camera.position - center))
+        half = d_cam * 0.6
+        field = (_state["_wa_data_field"]
+                 if _state["_render_mode_name"] in
+                 ("WeightedAverage", "WeightedVariance")
+                 else _state["_sd_field"])
+        _volume["field"] = field
+        vals = (None if field == "Masses"
+                else np.asarray(data.get_field(field), dtype=np.float64))
+        volume_renderer.res = _volume["res"]
+        toasts.show(f"Voxelizing {_volume['res']}^3...", "info")
+
+        def work():
+            try:
+                volume_renderer.voxelize(
+                    data.positions, data.masses.astype(np.float64),
+                    vals, center, half, _volume["res"])
+                _volume["used_gpu"] = volume_renderer.used_gpu_voxelize
+                volume_renderer.enabled = True
+                toasts.show(
+                    f"Volume ready ({'GPU' if _volume['used_gpu'] else 'CPU'}"
+                    f" voxelize)", "ok")
+            except Exception as e:
+                toasts.show(f"Volume failed: {e}", "error")
+            finally:
+                drawer.refresh()
+
+        threading.Thread(target=work, daemon=True).start()
+
     def _slice_normal():
         name, vec = _SLICE_NORMALS[_slice["normal_idx"]]
         if vec is None:
@@ -868,6 +1021,37 @@ def run_wgpu_app(
                 toasts.show(
                     f"Slice plane: normal {_slice['normal_label']} "
                     f"(Shift+Z cycles, Esc closes)")
+            elif key == glfw.KEY_V and (mods & glfw.MOD_SHIFT):
+                if not stream_renderer.lines:
+                    drawer.enabled = True
+                    drawer.mode = "streamlines"
+                    _stream_compute()
+                else:
+                    _stream["visible"] = not _stream["visible"]
+                    toasts.show(
+                        f"Streamlines "
+                        f"{'on' if _stream['visible'] else 'off'}")
+            elif key == glfw.KEY_B and (mods & glfw.MOD_SHIFT):
+                if "MagneticField" not in data.available_vector_fields():
+                    toasts.show("MagneticField not loaded", "warn")
+                elif arrow_renderer.n_instances == 0:
+                    _arrows_compute()
+                    _stream["field"] = "MagneticField"
+                else:
+                    arrow_renderer.n_instances = 0
+                    toasts.show("B-field arrows off")
+            elif key == glfw.KEY_W and (mods & glfw.MOD_SHIFT):
+                if not volume_renderer.enabled:
+                    drawer.enabled = True
+                    drawer.mode = "volume"
+                    _volume_compute()
+                else:
+                    volume_renderer.mode = 1 - volume_renderer.mode
+                    _volume["mip"] = volume_renderer.mode == 1
+                    drawer.refresh()
+                    toasts.show(
+                        "Volume: MIP" if _volume["mip"]
+                        else "Volume: emission-absorption")
             elif key == glfw.KEY_S and (mods & glfw.MOD_SHIFT):
                 _split["mode_idx"] = (_split["mode_idx"] + 1) % len(SPLIT_MODES)
                 mode_now = SPLIT_MODES[_split["mode_idx"]]
@@ -1187,6 +1371,65 @@ def run_wgpu_app(
                     scale_bar._last_key = None
                     app_proxy._apply_render_mode(auto_range=False)
                     toasts.show("View center moved to picked particle", "ok")
+                elif dr_action in ("sl_compute", "sl_seeds_down",
+                                   "sl_seeds_up", "sl_step", "sl_field",
+                                   "sl_surface"):
+                    if dr_action == "sl_seeds_down":
+                        _stream["n_seeds"] = max(64,
+                                                 _stream["n_seeds"] // 2)
+                    elif dr_action == "sl_seeds_up":
+                        _stream["n_seeds"] = min(1024,
+                                                 _stream["n_seeds"] * 2)
+                    elif dr_action == "sl_step":
+                        cyc = [0.5, 1.0, 2.0]
+                        _stream["step_mult"] = cyc[
+                            (cyc.index(_stream["step_mult"])
+                             if _stream["step_mult"] in cyc else 0 + 1)
+                            % len(cyc)]
+                    elif dr_action == "sl_field":
+                        vfs = data.available_vector_fields()
+                        if vfs:
+                            i = (vfs.index(_stream["field"]) + 1
+                                 if _stream["field"] in vfs else 0)
+                            _stream["field"] = vfs[i % len(vfs)]
+                    elif dr_action == "sl_surface":
+                        _stream["surface"] = not _stream["surface"]
+                    if dr_action == "sl_compute":
+                        _stream_compute()
+                    drawer.refresh()
+                elif dr_action in ("vol_compute", "vol_res", "vol_mip",
+                                   "vol_step_down", "vol_step_up",
+                                   "vol_tf_down", "vol_tf_up"):
+                    if dr_action == "vol_res":
+                        cyc = [64, 128, 256, 512]
+                        _volume["res"] = cyc[(cyc.index(_volume["res"])
+                                              + 1) % len(cyc)]
+                        _volume_compute()
+                    elif dr_action == "vol_mip":
+                        volume_renderer.mode = 1 - volume_renderer.mode
+                        _volume["mip"] = volume_renderer.mode == 1
+                    elif dr_action == "vol_step_down":
+                        volume_renderer.step_mult = max(
+                            0.25, volume_renderer.step_mult / 1.5)
+                        _volume["step_mult"] = volume_renderer.step_mult
+                    elif dr_action == "vol_step_up":
+                        volume_renderer.step_mult = min(
+                            4.0, volume_renderer.step_mult * 1.5)
+                        _volume["step_mult"] = volume_renderer.step_mult
+                    elif dr_action in ("vol_tf_down", "vol_tf_up"):
+                        # Move the transfer-function knee (middle
+                        # control point) up/down in opacity.
+                        pts = volume_renderer.tf_points
+                        if len(pts) >= 3:
+                            x, y = pts[1]
+                            y = float(np.clip(
+                                y + (0.05 if dr_action == "vol_tf_up"
+                                     else -0.05), 0.0, 1.0))
+                            pts[1] = (x, y)
+                            volume_renderer.upload_transfer_function()
+                    elif dr_action == "vol_compute":
+                        _volume_compute()
+                    drawer.refresh()
                 elif dr_action in ("iso_add", "iso_down", "iso_up",
                                    "iso_res", "iso_op", "iso_obj",
                                    "iso_clear"):
@@ -2667,6 +2910,14 @@ def run_wgpu_app(
                 if iso_renderer.surfaces and not _iso["busy"]:
                     iso_renderer.write_uniforms(camera)
                     iso_renderer.render_to_pass(rpass)
+                if volume_renderer.enabled:
+                    volume_renderer.render_to_pass(rpass, camera)
+                if _stream["visible"] and stream_renderer.lines:
+                    stream_renderer.write_uniforms(camera)
+                    stream_renderer.render_to_pass(rpass)
+                if arrow_renderer.n_instances > 0:
+                    arrow_renderer.write_uniforms(camera)
+                    arrow_renderer.render_to_pass(rpass)
                 if _slice["active"] and slice_renderer.grid is not None:
                     geom = _slice.get("_geom")
                     if geom is not None:

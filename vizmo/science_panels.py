@@ -1010,7 +1010,9 @@ class AnalysisDrawer(Panel):
                   "orbit": "Orbit integration",
                   "sightline": "Absorption sightlines",
                   "slice": "Slice plane",
-                  "isosurface": "Isosurface"}
+                  "isosurface": "Isosurface",
+                  "streamlines": "Streamlines",
+                  "volume": "Volume rendering"}
         title = titles.get(self.mode, "")
 
         plot_img, caption = (None, "")
@@ -1042,6 +1044,32 @@ class AnalysisDrawer(Panel):
             ]
             if props.get("circularity") is not None:
                 rows.append(("circularity", f"{props['circularity']:+.2f}"))
+        elif self.mode == "streamlines":
+            st = getattr(self, "stream_state", None) or {}
+            rows = [
+                ("Seeds", f"{st.get('n_seeds', 256)}"
+                          + (" (sphere surface)" if st.get("surface")
+                             else " (random)")),
+                ("Step x", f"{st.get('step_mult', 1.0):.2f}"),
+                ("Max steps", f"{st.get('max_steps', 200)}"),
+                ("Field", st.get("field", "Velocities")),
+                ("Color by", st.get("color_by", "|v|")),
+                ("Lines", f"{st.get('n_lines', 0)}"
+                          + (" computing..." if st.get("busy") else "")),
+            ]
+        elif self.mode == "volume":
+            st = getattr(self, "volume_state", None) or {}
+            rows = [
+                ("Mode", "MIP" if st.get("mip") else
+                 "emission-absorption"),
+                ("Resolution", f"{st.get('res', 128)}^3"),
+                ("Step x", f"{st.get('step_mult', 1.0):.2f}"),
+                ("Field", st.get("field", "Masses")),
+                ("Backend", "GPU voxelize" if st.get("used_gpu")
+                 else "CPU voxelize"),
+                ("TF points", f"{st.get('n_tf', 3)} "
+                              "(TF-/TF+ moves the knee)"),
+            ]
         elif self.mode == "isosurface":
             st = getattr(self, "iso_state", None)
             if st is None or not st.get("surfaces"):
@@ -1259,6 +1287,23 @@ class AnalysisDrawer(Panel):
             bx = fbtn(bx, "Compute", "orbit_compute")
             bx = fbtn(bx, "CSV", "orbit_csv")
             bx = fbtn(bx, "Stream", "orbit_stream")
+        elif self.mode == "streamlines":
+            bx = M
+            bx = fbtn(bx, "Go", "sl_compute")
+            bx = fbtn(bx, "N-", "sl_seeds_down")
+            bx = fbtn(bx, "N+", "sl_seeds_up")
+            bx = fbtn(bx, "Step", "sl_step")
+            bx = fbtn(bx, "Field", "sl_field")
+            bx = fbtn(bx, "Surf", "sl_surface")
+        elif self.mode == "volume":
+            bx = M
+            bx = fbtn(bx, "Go", "vol_compute")
+            bx = fbtn(bx, "Res", "vol_res")
+            bx = fbtn(bx, "MIP", "vol_mip")
+            bx = fbtn(bx, "St-", "vol_step_down")
+            bx = fbtn(bx, "St+", "vol_step_up")
+            bx = fbtn(bx, "TF-", "vol_tf_down")
+            bx = fbtn(bx, "TF+", "vol_tf_up")
         elif self.mode == "isosurface":
             bx = M
             bx = fbtn(bx, "Add", "iso_add")

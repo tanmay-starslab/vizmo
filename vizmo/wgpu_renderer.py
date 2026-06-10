@@ -3012,3 +3012,534 @@ def set_split_colormap(renderer, rgba_data):
 
 WGPURenderer.append_split_resolve = _append_split_resolve
 WGPURenderer.set_split_colormap = set_split_colormap
+
+
+# ---------------------------------------------------------------------------
+# Streamlines (5.C), field-line arrows (5.D), volume rendering (5.E)
+# ---------------------------------------------------------------------------
+
+def integrate_streamlines(pos, vec, hsml, rho, seeds, step_size,
+                          max_steps=200, k_neighbors=32, bounds=None,
+                          v_floor=1.0, n_workers=8):
+    """RK4 streamline integration through an SPH-sampled vector field.
+
+    The local vector at a point is the kernel-weighted average of the
+    k nearest particles' vectors:
+        v(x) = sum_j m_j v_j W(|x - x_j|/h_j) / rho_j / sum_j (...)
+    simplified here to inverse-kernel weighting without the mass/rho
+    factor cancelling in the normalized average (identical for the
+    direction field; magnitudes follow the local particle values).
+
+    Args:
+        pos: (N, 3) particle positions (code units).
+        vec: (N, 3) particle vector field (velocity or B).
+        hsml: (N,) smoothing lengths.
+        rho: (N,) densities (unused weighting hook, may be None).
+        seeds: (S, 3) seed points.
+        step_size: integration step (code units).
+        max_steps: maximum steps per line.
+        k_neighbors: neighbors per interpolation.
+        bounds: optional (center, radius) sphere; integration stops on
+            exit (the aperture clamp — tested).
+        v_floor: stop when |v| falls below this (field units).
+        n_workers: thread pool size.
+
+    Returns:
+        list of dicts: {"points": (n, 3), "values": (n,) |v|}.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+    from scipy.spatial import cKDTree
+
+    pos = np.asarray(pos, dtype=np.float64)
+    vec = np.asarray(vec, dtype=np.float64)
+    h = np.asarray(hsml, dtype=np.float64)
+    tree = cKDTree(pos)
+    if bounds is not None:
+        b_center = np.asarray(bounds[0], dtype=np.float64)
+        b_r = float(bounds[1])
+
+    def sample(x):
+        d, idx = tree.query(x, k=k_neighbors)
+        d = np.atleast_1d(d)
+        idx = np.atleast_1d(idx)
+        w = _kernel_m4_np(np.minimum(d / np.maximum(h[idx], 1e-30), 0.999))
+        w += 1e-30
+        return (vec[idx] * w[:, None]).sum(axis=0) / w.sum()
+
+    def trace(seed):
+        x = np.asarray(seed, dtype=np.float64).copy()
+        pts = [x.copy()]
+        vals = []
+        v0 = sample(x)
+        vals.append(np.linalg.norm(v0))
+        for _ in range(max_steps):
+            if bounds is not None and np.linalg.norm(x - b_center) > b_r:
+                break
+            v1 = sample(x)
+            sp = np.linalg.norm(v1)
+            if sp < v_floor:
+                break
+            k1 = v1 / sp
+            k2v = sample(x + 0.5 * step_size * k1)
+            k2 = k2v / max(np.linalg.norm(k2v), 1e-30)
+            k3v = sample(x + 0.5 * step_size * k2)
+            k3 = k3v / max(np.linalg.norm(k3v), 1e-30)
+            k4v = sample(x + step_size * k3)
+            k4 = k4v / max(np.linalg.norm(k4v), 1e-30)
+            x = x + step_size * (k1 + 2 * k2 + 2 * k3 + k4) / 6.0
+            pts.append(x.copy())
+            vals.append(sp)
+        return {"points": np.array(pts),
+                "values": np.array(vals[:len(pts)])}
+
+    with ThreadPoolExecutor(max_workers=n_workers) as ex:
+        return list(ex.map(trace, seeds))
+
+
+def fibonacci_sphere(n, center, radius):
+    """n seed points on a sphere surface (Fibonacci lattice)."""
+    i = np.arange(n, dtype=np.float64)
+    phi = np.arccos(1.0 - 2.0 * (i + 0.5) / n)
+    theta = np.pi * (1.0 + 5.0**0.5) * i
+    d = np.stack([np.sin(phi) * np.cos(theta),
+                  np.sin(phi) * np.sin(theta), np.cos(phi)], axis=1)
+    return np.asarray(center)[None, :] + radius * d
+
+
+class StreamlineRenderer:
+    """GPU polylines for streamlines: one line_strip draw per line,
+    per-vertex RGBA from the color-by field through the colormap."""
+
+    def __init__(self, device, present_format):
+        self.device = device
+        self.lines = []  # dicts: vbo, n, ref
+        shader = device.create_shader_module(
+            code=_load_wgsl("streamlines.wgsl"))
+        self._bgl = device.create_bind_group_layout(entries=[
+            {"binding": 0, "visibility": wgpu.ShaderStage.VERTEX,
+             "buffer": {"type": "uniform"}}])
+        layout = device.create_pipeline_layout(
+            bind_group_layouts=[self._bgl])
+        self._pipeline = device.create_render_pipeline(
+            layout=layout,
+            vertex={"module": shader, "entry_point": "vs_main",
+                    "buffers": [{
+                        "array_stride": 28, "step_mode": "vertex",
+                        "attributes": [
+                            {"format": "float32x3", "offset": 0,
+                             "shader_location": 0},
+                            {"format": "float32x4", "offset": 12,
+                             "shader_location": 1}]}]},
+            primitive={"topology": "line-strip"},
+            fragment={"module": shader, "entry_point": "fs_main",
+                      "targets": [{"format": present_format, "blend": {
+                          "color": {"src_factor": "src-alpha",
+                                    "dst_factor": "one-minus-src-alpha"},
+                          "alpha": {"src_factor": "one",
+                                    "dst_factor": "one-minus-src-alpha"}}}]},
+        )
+        self._ubuf = device.create_buffer(
+            size=64, usage=(wgpu.BufferUsage.UNIFORM
+                            | wgpu.BufferUsage.COPY_DST))
+        self._bg = device.create_bind_group(
+            layout=self._bgl,
+            entries=[{"binding": 0, "resource": {"buffer": self._ubuf}}])
+        self._ref = np.zeros(3)
+
+    def set_lines(self, traces, colormap_rgba, vmin, vmax,
+                  log_scale=True):
+        self.lines = []
+        if not traces:
+            return
+        self._ref = np.mean([t["points"][0] for t in traces], axis=0)
+        for t in traces:
+            pts = t["points"]
+            if len(pts) < 2:
+                continue
+            vals = t["values"].astype(np.float64)
+            if log_scale:
+                with np.errstate(invalid="ignore", divide="ignore"):
+                    vals = np.log10(np.where(vals > 0, vals, np.nan))
+            x = (vals - vmin) / max(vmax - vmin, 1e-30)
+            idx = np.clip(np.nan_to_num(x) * 255, 0, 255).astype(np.uint8)
+            rgba = colormap_rgba[idx].astype(np.float32) / 255.0
+            rgba[:, 3] = 0.9
+            inter = np.empty((len(pts), 7), dtype=np.float32)
+            inter[:, :3] = pts - self._ref[None, :]
+            inter[:, 3:] = rgba[:len(pts)]
+            vbo = self.device.create_buffer_with_data(
+                data=inter.tobytes(), usage=wgpu.BufferUsage.VERTEX)
+            self.lines.append({"vbo": vbo, "n": len(pts)})
+
+    def write_uniforms(self, camera):
+        view = camera.view_matrix().astype(np.float64)
+        proj = camera.projection_matrix().astype(np.float64)
+        t = np.eye(4)
+        t[:3, 3] = self._ref
+        mvp = (proj @ view @ t).astype(np.float32)
+        self.device.queue.write_buffer(
+            self._ubuf, 0, mvp.T.copy().tobytes())
+
+    def render_to_pass(self, rpass):
+        for ln in self.lines:
+            rpass.set_pipeline(self._pipeline)
+            rpass.set_bind_group(0, self._bg)
+            rpass.set_vertex_buffer(0, ln["vbo"])
+            rpass.draw(ln["n"])
+
+
+class ArrowRenderer:
+    """Instanced procedural arrow glyphs (max 5000 instances)."""
+
+    MAX_ARROWS = 5000
+    VERTS_PER = 30
+
+    def __init__(self, device, present_format):
+        self.device = device
+        self.n_instances = 0
+        shader = device.create_shader_module(code=_load_wgsl("arrows.wgsl"))
+        self._bgl = device.create_bind_group_layout(entries=[
+            {"binding": 0,
+             "visibility": (wgpu.ShaderStage.VERTEX
+                            | wgpu.ShaderStage.FRAGMENT),
+             "buffer": {"type": "uniform"}}])
+        layout = device.create_pipeline_layout(
+            bind_group_layouts=[self._bgl])
+        self._pipeline = device.create_render_pipeline(
+            layout=layout,
+            vertex={"module": shader, "entry_point": "vs_main",
+                    "buffers": [{
+                        "array_stride": 40, "step_mode": "instance",
+                        "attributes": [
+                            {"format": "float32x3", "offset": 0,
+                             "shader_location": 0},
+                            {"format": "float32x3", "offset": 12,
+                             "shader_location": 1},
+                            {"format": "float32x4", "offset": 24,
+                             "shader_location": 2}]}]},
+            primitive={"topology": "triangle-list"},
+            fragment={"module": shader, "entry_point": "fs_main",
+                      "targets": [{"format": present_format, "blend": {
+                          "color": {"src_factor": "src-alpha",
+                                    "dst_factor": "one-minus-src-alpha"},
+                          "alpha": {"src_factor": "one",
+                                    "dst_factor": "one-minus-src-alpha"}}}]},
+        )
+        self._ubuf = device.create_buffer(
+            size=80, usage=(wgpu.BufferUsage.UNIFORM
+                            | wgpu.BufferUsage.COPY_DST))
+        self._bg = device.create_bind_group(
+            layout=self._bgl,
+            entries=[{"binding": 0, "resource": {"buffer": self._ubuf}}])
+        self._vbo = None
+        self._ref = np.zeros(3)
+        self._radius = 1.0
+
+    def set_arrows(self, positions, vectors, colors, arrow_length):
+        """positions (N,3) code units; vectors (N,3) normalized scale
+        applied by caller; colors (N,4) float 0-1."""
+        n = min(len(positions), self.MAX_ARROWS)
+        if n == 0:
+            self.n_instances = 0
+            return
+        sel = (np.random.default_rng(0).choice(len(positions), n,
+                                               replace=False)
+               if len(positions) > n else np.arange(n))
+        self._ref = positions[sel].mean(axis=0)
+        inter = np.empty((n, 10), dtype=np.float32)
+        inter[:, :3] = positions[sel] - self._ref[None, :]
+        inter[:, 3:6] = vectors[sel]
+        inter[:, 6:] = colors[sel]
+        self._vbo = self.device.create_buffer_with_data(
+            data=inter.tobytes(), usage=wgpu.BufferUsage.VERTEX)
+        self.n_instances = n
+        self._radius = arrow_length * 0.06
+
+    def write_uniforms(self, camera):
+        if self.n_instances == 0:
+            return
+        view = camera.view_matrix().astype(np.float64)
+        proj = camera.projection_matrix().astype(np.float64)
+        t = np.eye(4)
+        t[:3, 3] = self._ref
+        mvp = (proj @ view @ t).astype(np.float32)
+        buf = np.zeros(20, dtype=np.float32)
+        buf[:16] = mvp.T.reshape(-1)
+        buf[16] = self._radius
+        self.device.queue.write_buffer(self._ubuf, 0, buf.tobytes())
+
+    def render_to_pass(self, rpass):
+        if self.n_instances == 0 or self._vbo is None:
+            return
+        rpass.set_pipeline(self._pipeline)
+        rpass.set_bind_group(0, self._bg)
+        rpass.set_vertex_buffer(0, self._vbo)
+        rpass.draw(self.VERTS_PER, self.n_instances)
+
+
+VOXELIZE_FIXED_SCALE = 1.0e6
+
+
+class VolumeRenderer:
+    """Emission-absorption / MIP ray marcher over a voxelized field.
+
+    Voxelization: GPU compute (voxelize.wgsl, fixed-point u32 atomics)
+    with a CPU CIC fallback. The 3D texture and the 1D transfer
+    function feed volume.wgsl's fullscreen ray-march pass. Resolution
+    auto-halves while the camera moves (LOD hook driven by the app).
+    """
+
+    def __init__(self, device, present_format):
+        self.device = device
+        self.enabled = False
+        self.mode = 0          # 0 = emission-absorption, 1 = MIP
+        self.step_mult = 1.0
+        self.max_steps = 512
+        self.res = 128
+        self.vmin = 0.0
+        self.vmax = 1.0
+        self.log_scale = True
+        self._tex3d = None
+        self._tex3d_res = 0
+        self._tf_tex = None
+        self.tf_points = [(0.0, 0.0), (0.6, 0.05), (1.0, 0.8)]
+        self._grid = None
+        self.center = None
+        self.half_size = None
+        self.used_gpu_voxelize = False
+
+        shader = device.create_shader_module(code=_load_wgsl("volume.wgsl"))
+        self._bgl = device.create_bind_group_layout(entries=[
+            {"binding": 0,
+             "visibility": (wgpu.ShaderStage.VERTEX
+                            | wgpu.ShaderStage.FRAGMENT),
+             "buffer": {"type": "uniform"}},
+            {"binding": 1, "visibility": wgpu.ShaderStage.FRAGMENT,
+             "texture": {"sample_type": "float",
+                         "view_dimension": "3d"}},
+            {"binding": 2, "visibility": wgpu.ShaderStage.FRAGMENT,
+             "sampler": {"type": "filtering"}},
+            {"binding": 3, "visibility": wgpu.ShaderStage.FRAGMENT,
+             "texture": {"sample_type": "float",
+                         "view_dimension": "1d"}},
+            {"binding": 4, "visibility": wgpu.ShaderStage.FRAGMENT,
+             "sampler": {"type": "filtering"}},
+        ])
+        layout = device.create_pipeline_layout(
+            bind_group_layouts=[self._bgl])
+        self._pipeline = device.create_render_pipeline(
+            layout=layout,
+            vertex={"module": shader, "entry_point": "vs_main",
+                    "buffers": []},
+            primitive={"topology": "triangle-list"},
+            fragment={"module": shader, "entry_point": "fs_main",
+                      "targets": [{"format": present_format, "blend": {
+                          "color": {"src_factor": "src-alpha",
+                                    "dst_factor": "one-minus-src-alpha"},
+                          "alpha": {"src_factor": "one",
+                                    "dst_factor": "one-minus-src-alpha"}}}]},
+        )
+        self._ubuf = device.create_buffer(
+            size=112, usage=(wgpu.BufferUsage.UNIFORM
+                             | wgpu.BufferUsage.COPY_DST))
+        self._sampler = device.create_sampler(
+            mag_filter="linear", min_filter="linear",
+            address_mode_x="clamp-to-edge",
+            address_mode_y="clamp-to-edge",
+            address_mode_z="clamp-to-edge")
+        self._bg = None
+        self._vox_pipeline = None
+        self._vox_bgl = None
+
+    # -- voxelization ---------------------------------------------------
+
+    def _voxelize_gpu(self, pos, mass, center, half_size, n_grid):
+        dev = self.device
+        if self._vox_pipeline is None:
+            shader = dev.create_shader_module(
+                code=_load_wgsl("voxelize.wgsl"))
+            self._vox_bgl = dev.create_bind_group_layout(entries=[
+                {"binding": 0, "visibility": wgpu.ShaderStage.COMPUTE,
+                 "buffer": {"type": "uniform"}},
+                {"binding": 1, "visibility": wgpu.ShaderStage.COMPUTE,
+                 "buffer": {"type": "read-only-storage"}},
+                {"binding": 2, "visibility": wgpu.ShaderStage.COMPUTE,
+                 "buffer": {"type": "read-only-storage"}},
+                {"binding": 3, "visibility": wgpu.ShaderStage.COMPUTE,
+                 "buffer": {"type": "storage"}},
+            ])
+            layout = dev.create_pipeline_layout(
+                bind_group_layouts=[self._vox_bgl])
+            self._vox_pipeline = dev.create_compute_pipeline(
+                layout=layout,
+                compute={"module": shader, "entry_point": "cs_main"})
+        n = len(pos)
+        pos4 = np.zeros((n, 4), dtype=np.float32)
+        pos4[:, :3] = pos
+        params = np.zeros(8, dtype=np.float32)
+        params[0:3] = center
+        params[3] = half_size
+        params.view(np.uint32)[4] = n_grid
+        params.view(np.uint32)[5] = n
+        # Fixed-point scale chosen so the total deposited mass stays
+        # far below u32 overflow per voxel.
+        scale = VOXELIZE_FIXED_SCALE / max(float(mass.max()), 1e-30)
+        params[6] = scale
+        pbuf = dev.create_buffer_with_data(
+            data=params.tobytes(), usage=wgpu.BufferUsage.UNIFORM)
+        posb = dev.create_buffer_with_data(
+            data=pos4.tobytes(), usage=wgpu.BufferUsage.STORAGE)
+        mb = dev.create_buffer_with_data(
+            data=np.ascontiguousarray(mass, dtype=np.float32).tobytes(),
+            usage=wgpu.BufferUsage.STORAGE)
+        outb = dev.create_buffer(
+            size=n_grid**3 * 4,
+            usage=wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_SRC)
+        bg = dev.create_bind_group(
+            layout=self._vox_bgl,
+            entries=[{"binding": i, "resource": {"buffer": b}}
+                     for i, b in enumerate([pbuf, posb, mb, outb])])
+        enc = dev.create_command_encoder()
+        cp = enc.begin_compute_pass()
+        cp.set_pipeline(self._vox_pipeline)
+        cp.set_bind_group(0, bg)
+        cp.dispatch_workgroups((n + 255) // 256)
+        cp.end()
+        dev.queue.submit([enc.finish()])
+        raw = dev.queue.read_buffer(outb)
+        fixed = np.frombuffer(raw, dtype=np.uint32).astype(np.float64)
+        return (fixed / scale).reshape(n_grid, n_grid, n_grid)
+
+    def voxelize(self, pos, mass, vals, center, half_size, n_grid=None):
+        """Voxelize a (mass-weighted) field; GPU first, CPU fallback."""
+        if n_grid is None:
+            n_grid = self.res
+        try:
+            grid_m = self._voxelize_gpu(pos, mass, center, half_size,
+                                        n_grid)
+            self.used_gpu_voxelize = True
+        except Exception as e:
+            print(f"  volume: GPU voxelize unavailable ({e}); CPU CIC")
+            grid_m = voxelize_particles(pos, mass, center, half_size,
+                                        n_grid)
+            self.used_gpu_voxelize = False
+        if vals is None:
+            grid = grid_m
+        else:
+            try:
+                grid_f = (self._voxelize_gpu(pos, mass * vals, center,
+                                             half_size, n_grid)
+                          if self.used_gpu_voxelize else
+                          voxelize_particles(pos, mass * vals, center,
+                                             half_size, n_grid))
+            except Exception:
+                grid_f = voxelize_particles(pos, mass * vals, center,
+                                            half_size, n_grid)
+            with np.errstate(invalid="ignore", divide="ignore"):
+                grid = np.where(grid_m > 0, grid_f / grid_m, 0.0)
+        self.set_grid(grid, center, half_size)
+        return grid
+
+    def set_grid(self, grid, center, half_size):
+        """Upload a voxel grid as the 3D texture (+ display range)."""
+        self._grid = grid
+        self.center = np.asarray(center, dtype=np.float64)
+        self.half_size = float(half_size)
+        disp = grid.astype(np.float64)
+        if self.log_scale:
+            with np.errstate(invalid="ignore", divide="ignore"):
+                disp = np.log10(np.where(disp > 0, disp, np.nan))
+        fin = disp[np.isfinite(disp)]
+        if fin.size:
+            self.vmin = float(np.percentile(fin, 5))
+            self.vmax = float(np.percentile(fin, 99.8))
+        tex_data = np.nan_to_num(
+            disp, nan=(self.vmin - 10.0)).astype(np.float32)
+        n = grid.shape[0]
+        dev = self.device
+        if self._tex3d_res != n:
+            self._tex3d = dev.create_texture(
+                size=(n, n, n), format="r32float", dimension="3d",
+                usage=(wgpu.TextureUsage.TEXTURE_BINDING
+                       | wgpu.TextureUsage.COPY_DST))
+            self._tex3d_res = n
+            self._bg = None
+        # wgpu 3D write: z-major layout, rows_per_image = height.
+        dev.queue.write_texture(
+            {"texture": self._tex3d, "mip_level": 0,
+             "origin": (0, 0, 0)},
+            np.ascontiguousarray(
+                np.transpose(tex_data, (2, 1, 0))).tobytes(),
+            {"bytes_per_row": n * 4, "rows_per_image": n},
+            (n, n, n))
+        self.upload_transfer_function()
+
+    def upload_transfer_function(self, colormap_rgba=None):
+        """Build the 1D RGBA transfer function from the piecewise-
+        linear opacity control points + a colormap ramp."""
+        n = 256
+        x = np.linspace(0, 1, n)
+        pts = sorted(self.tf_points)
+        xs = [p[0] for p in pts]
+        ys = [p[1] for p in pts]
+        alpha = np.interp(x, xs, ys)
+        if colormap_rgba is None:
+            import matplotlib
+
+            cmap = matplotlib.colormaps["inferno"]
+            rgb = (cmap(x)[:, :3] * 255).astype(np.uint8)
+        else:
+            rgb = colormap_rgba[:, :3]
+        tf = np.zeros((n, 4), dtype=np.uint8)
+        tf[:, :3] = rgb
+        tf[:, 3] = (np.clip(alpha, 0, 1) * 255).astype(np.uint8)
+        dev = self.device
+        if self._tf_tex is None:
+            self._tf_tex = dev.create_texture(
+                size=(n, 1, 1), format="rgba8unorm", dimension="1d",
+                usage=(wgpu.TextureUsage.TEXTURE_BINDING
+                       | wgpu.TextureUsage.COPY_DST))
+            self._bg = None
+        dev.queue.write_texture(
+            {"texture": self._tf_tex, "mip_level": 0,
+             "origin": (0, 0, 0)},
+            np.ascontiguousarray(tf).tobytes(),
+            {"bytes_per_row": n * 4, "rows_per_image": 1}, (n, 1, 1))
+
+    def render_to_pass(self, rpass, camera):
+        if (self._tex3d is None or self._tf_tex is None
+                or self.center is None):
+            return
+        if self._bg is None:
+            self._bg = self.device.create_bind_group(
+                layout=self._bgl,
+                entries=[
+                    {"binding": 0, "resource": {"buffer": self._ubuf}},
+                    {"binding": 1,
+                     "resource": self._tex3d.create_view(
+                         dimension="3d")},
+                    {"binding": 2, "resource": self._sampler},
+                    {"binding": 3,
+                     "resource": self._tf_tex.create_view(
+                         dimension="1d")},
+                    {"binding": 4, "resource": self._sampler},
+                ])
+        buf = np.zeros(28, dtype=np.float32)
+        buf[0:3] = camera.position
+        buf[3] = np.radians(camera.fov)
+        buf[4:7] = camera.forward
+        buf[7] = camera.aspect
+        buf[8:11] = camera.right
+        buf[11] = self.step_mult
+        buf[12:15] = camera.up
+        buf[15] = self.vmin
+        buf[16:19] = self.center
+        buf[19] = self.vmax
+        buf[20] = self.half_size
+        buf[21] = float(self._tex3d_res)
+        buf.view(np.uint32)[22] = self.mode
+        buf.view(np.uint32)[23] = self.max_steps
+        self.device.queue.write_buffer(self._ubuf, 0, buf.tobytes())
+        rpass.set_pipeline(self._pipeline)
+        rpass.set_bind_group(0, self._bg)
+        rpass.draw(3)
