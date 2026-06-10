@@ -39,6 +39,7 @@ KEYBINDINGS = [
     ("F2 / F3 / F4", "Snap view along +X / +Y / +Z (Shift: negative)"),
     ("B / Shift+B", "Cycle star band forward / back"),
     ("O", "Toggle orbit-integration panel"),
+    ("Shift+A", "Sightline mode: click 2 points (column densities)"),
     ("Shift+O", "Toggle star dust extinction"),
     ("K", "Toggle sink/star panel"),
     ("\\", "Toggle developer HUD"),

@@ -252,6 +252,15 @@ def run_wgpu_app(
     from .wgpu_overlay import WGPUApertureOverlay
 
     aperture_panel = WGPUApertureOverlay(device, present_format)
+    from .wgpu_overlay import WGPUSightlinesOverlay
+
+    sightline_overlay = WGPUSightlinesOverlay(device, present_format)
+    # Absorption sightlines: Shift+A toggles placement mode (click two
+    # particles to define the segment). Computed columns live on the
+    # Sightline objects; the drawer's "sightline" tool lists them.
+    _sightlines = {"list": [], "placing": False, "pending_start": None,
+                   "trident_procs": []}
+    drawer.sightlines = _sightlines["list"]
     _aperture = {
         "active": False,      # submitted and in use
         "placing": False,     # interactive placement in progress
@@ -585,6 +594,15 @@ def run_wgpu_app(
                     toasts.show(
                         "Aperture: click=center, scroll=size, M=set, Esc=cancel",
                         duration=5.0)
+            elif key == glfw.KEY_A and (mods & glfw.MOD_SHIFT):
+                _sightlines["placing"] = not _sightlines["placing"]
+                _sightlines["pending_start"] = None
+                if _sightlines["placing"]:
+                    toasts.show(
+                        "Sightline mode: click start point, then end point",
+                        duration=5.0)
+                else:
+                    toasts.show("Sightline mode off")
             elif key == glfw.KEY_F9:
                 vis = not scale_bar.enabled
                 scale_bar.enabled = vis
@@ -829,6 +847,20 @@ def run_wgpu_app(
                 glfw.get_key(win, glfw.KEY_LEFT_SHIFT) == glfw.PRESS
                 or glfw.get_key(win, glfw.KEY_RIGHT_SHIFT) == glfw.PRESS
             )
+            if _sightlines["placing"] and not shift_held:
+                fw, fh = glfw.get_framebuffer_size(win)
+                nx = 2.0 * x / max(fw, 1) - 1.0
+                ny = 1.0 - 2.0 * y / max(fh, 1)
+                tan_half = np.tan(np.radians(camera.fov) / 2.0)
+                ray = (camera.forward
+                       + nx * tan_half * camera.aspect * camera.right
+                       + ny * tan_half * camera.up)
+                _pending_pick["ray"] = ray / np.linalg.norm(ray)
+                _pending_pick["frames"] = 2
+                _pending_pick["purpose"] = "sightline"
+                if getattr(data, "_pick_tree", None) is None:
+                    toasts.show("Building spatial index...", "info")
+                return
             if _aperture["placing"] and not shift_held:
                 # Aperture placement: a plain click drops the center on
                 # the particle under the cursor (mouse-look is disabled
@@ -875,6 +907,44 @@ def run_wgpu_app(
                     scale_bar._last_key = None
                     app_proxy._apply_render_mode(auto_range=False)
                     toasts.show("View center moved to picked particle", "ok")
+                elif dr_action == "sightline_csv":
+                    if _sightlines["list"]:
+                        import os as _os
+
+                        from .spectro import sightlines_to_csv
+
+                        out = _os.path.join(
+                            screenshot_dir or ".",
+                            f"vizmo_sightlines_{int(time.time())}.csv")
+                        sightlines_to_csv(out, _sightlines["list"])
+                        toasts.show(
+                            f"Sightlines saved: {_os.path.basename(out)}",
+                            "ok")
+                    else:
+                        toasts.show("No sightlines yet", "warn")
+                elif dr_action == "sightline_trident":
+                    if not _sightlines["list"]:
+                        toasts.show("No sightlines yet", "warn")
+                    else:
+                        try:
+                            from .spectro import launch_trident_spectrum
+
+                            proc = launch_trident_spectrum(
+                                _sightlines["list"][-1], snapshot_path,
+                                os.path.join(screenshot_dir or ".",
+                                             "spectra"))
+                            _sightlines["trident_procs"].append(
+                                (_sightlines["list"][-1], proc))
+                            toasts.show(
+                                f"Trident running for "
+                                f"{_sightlines['list'][-1].label}...", "info",
+                                duration=6.0)
+                        except ImportError as e:
+                            toasts.show(str(e), "error", duration=8.0)
+                elif dr_action == "sightline_clear":
+                    _sightlines["list"].clear()
+                    sightline_overlay.enabled = False
+                    drawer.refresh()
                 elif dr_action == "orbit_compute":
                     _compute_orbit(stream=False)
                 elif dr_action == "orbit_stream":
@@ -1553,6 +1623,29 @@ def run_wgpu_app(
                     toasts.show(f"Pick failed: {e}", "error")
                 if idx is None:
                     toasts.show("No particle under cursor", "warn")
+                elif _pending_pick["purpose"] == "sightline":
+                    p_pick = data.positions[idx].copy()
+                    if _sightlines["pending_start"] is None:
+                        _sightlines["pending_start"] = p_pick
+                        toasts.show("Sightline start set — click end point")
+                    else:
+                        from .spectro import (Sightline,
+                                              compute_los_column_densities)
+
+                        n_sl = len(_sightlines["list"]) + 1
+                        sl = Sightline(
+                            start=_sightlines["pending_start"],
+                            end=p_pick, label=f"SL-{n_sl:03d}")
+                        _sightlines["pending_start"] = None
+                        try:
+                            compute_los_column_densities(sl, data)
+                            _sightlines["list"].append(sl)
+                            sightline_overlay.enabled = True
+                            drawer.enabled = True
+                            drawer.mode = "sightline"
+                            toasts.show(sl.summary(), "ok", duration=6.0)
+                        except Exception as e:
+                            toasts.show(f"Sightline failed: {e}", "error")
                 elif _pending_pick["purpose"] == "aperture":
                     _aperture["center"] = data.positions[idx].copy()
                     toasts.show("Aperture center placed (M to set)", "ok")
@@ -2005,6 +2098,39 @@ def run_wgpu_app(
                 if drawer.enabled:
                     drawer.update(data)
 
+                # Sightline overlay (projected segments).
+                if sightline_overlay.enabled and _sightlines["list"]:
+                    sightline_overlay.set_framebuffer_size(fb_w, fb_h)
+                    segs = []
+                    for sl in _sightlines["list"]:
+                        pa = _world_to_screen(sl.start, fb_w, fb_h)
+                        pb = _world_to_screen(sl.end, fb_w, fb_h)
+                        if pa is not None and pb is not None:
+                            segs.append((pa[0], pa[1], pb[0], pb[1],
+                                         sl.label, sl.color))
+                    sightline_overlay.update(segs)
+
+                # Trident completion polling (sentinel files).
+                if _sightlines["trident_procs"]:
+                    done_now = []
+                    for sl_t, proc in _sightlines["trident_procs"]:
+                        sent = sl_t.extra.get("trident_done_sentinel")
+                        if sent and os.path.exists(sent):
+                            done_now.append((sl_t, proc))
+                            toasts.show(
+                                f"Trident done: {sl_t.label} -> "
+                                f"{os.path.basename(sl_t.trident_spectrum_path)}",
+                                "ok", duration=8.0)
+                        elif proc.poll() is not None and not (
+                                sent and os.path.exists(sent)):
+                            done_now.append((sl_t, proc))
+                            toasts.show(
+                                f"Trident failed for {sl_t.label} "
+                                f"(exit {proc.returncode})", "error",
+                                duration=8.0)
+                    for item in done_now:
+                        _sightlines["trident_procs"].remove(item)
+
                 # Aperture sphere indicator (projected circle).
                 _aperture["visible"] = False
                 if aperture_panel.enabled and _aperture["center"] is not None:
@@ -2091,6 +2217,8 @@ def run_wgpu_app(
                     gizmo.render_to_pass(rpass)
                 if aperture_panel.enabled and _aperture.get("visible"):
                     aperture_panel.render_to_pass(rpass)
+                if sightline_overlay.enabled and _sightlines["list"]:
+                    sightline_overlay.render_to_pass(rpass)
                 if sink_panel.enabled:
                     sink_panel.render_to_pass(rpass)
                 if overlay.enabled:

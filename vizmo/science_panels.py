@@ -470,6 +470,58 @@ class ApertureOverlay(Panel):
         super().render()
 
 
+class SightlinesOverlay(Panel):
+    """Projected absorption sightlines drawn as labelled 2D segments.
+
+    The app passes a list of (x0, y0, x1, y1, label, color) tuples in
+    framebuffer pixels each frame; rebuild is keyed on the rounded
+    coordinates so static views don't re-rasterize.
+    """
+
+    def __init__(self):
+        super().__init__(APERTURE_STYLE)
+        self.enabled = False
+        self._last_key = None
+        self._pos_px = (0, 0)
+
+    def _panel_origin(self, tw, th):
+        return self._pos_px
+
+    def update(self, segments):
+        if not self.enabled or not segments:
+            self._tex = None
+            return
+        key = tuple((int(a), int(b), int(c), int(d), lbl)
+                    for a, b, c, d, lbl, _ in segments) + (
+                        self._fb_width, self._fb_height)
+        if key == self._last_key and self._tex is not None:
+            return
+        self._last_key = key
+        tw, th = max(self._fb_width, 4), max(self._fb_height, 4)
+        img = Image.new("RGBA", (tw, th), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(img)
+        for x0, y0, x1, y1, lbl, color in segments:
+            draw.line([(x0 + 1, y0 + 1), (x1 + 1, y1 + 1)],
+                      fill=(0, 0, 0, 150), width=4)
+            draw.line([(x0, y0), (x1, y1)], fill=color, width=2)
+            for x, y in ((x0, y0), (x1, y1)):
+                draw.ellipse([x - 4, y - 4, x + 4, y + 4],
+                             outline=color, width=2)
+            mx, my = (x0 + x1) / 2, (y0 + y1) / 2
+            draw.text((mx + 7, my + 1), lbl, fill=(0, 0, 0, 150),
+                      font=self._font)
+            draw.text((mx + 6, my), lbl, fill=color, font=self._font)
+        self._pos_px = (0, 0)
+        self._panel_w, self._panel_h = tw, th
+        self._panel_x, self._panel_y = 0, 0
+        self._upload_panel(tw, th, img.tobytes())
+
+    def render(self):
+        if not self.enabled:
+            return
+        super().render()
+
+
 # ---------------------------------------------------------------------------
 # Analysis drawer
 # ---------------------------------------------------------------------------
@@ -955,7 +1007,8 @@ class AnalysisDrawer(Panel):
         titles = {"inspector": "Particle inspector", "phase": "Phase diagram",
                   "profile": "Radial profile", "stats": "Region statistics",
                   "spectrum": "Power spectrum",
-                  "orbit": "Orbit integration"}
+                  "orbit": "Orbit integration",
+                  "sightline": "Absorption sightlines"}
         title = titles.get(self.mode, "")
 
         plot_img, caption = (None, "")
@@ -987,6 +1040,23 @@ class AnalysisDrawer(Panel):
             ]
             if props.get("circularity") is not None:
                 rows.append(("circularity", f"{props['circularity']:+.2f}"))
+        elif self.mode == "sightline":
+            sls = getattr(self, "sightlines", [])
+            if not sls:
+                rows = [("No sightlines", "Shift+A, then click 2 points")]
+            else:
+                rows = []
+                for s in sls:
+                    rows.append((s.label,
+                                 f"b={s.impact_b_kpc:.0f} kpc"
+                                 if s.impact_b_kpc is not None else ""))
+                    def _lg(v):
+                        return (f"{np.log10(v):.2f}" if v and v > 0
+                                else "-")
+                    rows.append(("  log N(HI)", _lg(s.NHI)))
+                    rows.append(("  log N(OVI)*", _lg(s.N_OVI)))
+                    rows.append(("  log N(CIV)*", _lg(s.N_CIV)))
+                rows.append(("* CIE approx", "use Trident for science"))
         elif self.mode == "stats":
             sc_center, sc_radius = self._active_scope()
             r_use = sc_radius if sc_radius is not None else self._stats_radius_kpc
@@ -1157,6 +1227,11 @@ class AnalysisDrawer(Panel):
             bx = fbtn(bx, "Compute", "orbit_compute")
             bx = fbtn(bx, "CSV", "orbit_csv")
             bx = fbtn(bx, "Stream", "orbit_stream")
+        elif self.mode == "sightline":
+            bx = M
+            bx = fbtn(bx, "CSV", "sightline_csv")
+            bx = fbtn(bx, "Trident", "sightline_trident")
+            bx = fbtn(bx, "Clear", "sightline_clear")
         elif self.mode == "spectrum":
             bx = M
             bx = fbtn(bx, "CSV", "spectrum_csv")
