@@ -389,6 +389,8 @@ def run_wgpu_app(
     stream_renderer = StreamlineRenderer(device, present_format)
     arrow_renderer = ArrowRenderer(device, present_format)
     volume_renderer = VolumeRenderer(device, present_format)
+    orbit_trail_renderer = StreamlineRenderer(device, present_format)
+    _orbit_trail = {"visible": False}
     _stream = {"n_seeds": 256, "step_mult": 1.0, "max_steps": 200,
                "field": "Velocities", "color_by": "|v|",
                "surface": False, "visible": False, "busy": False,
@@ -910,7 +912,11 @@ def run_wgpu_app(
                 if mods & glfw.MOD_SHIFT:
                     renderer.toggle_star_extinction()
                 else:
+                    was_open = drawer.enabled and drawer.mode == "orbit"
                     drawer.toggle("orbit")
+                    if was_open and orbit_trail_renderer.lines:
+                        # Closing the panel: O also toggles the trail.
+                        _orbit_trail["visible"] = not _orbit_trail["visible"]
             elif key == glfw.KEY_LEFT_BRACKET:
                 print(f"FOV: {camera.adjust_fov(-5.0):.0f}°")
             elif key == glfw.KEY_RIGHT_BRACKET:
@@ -2047,6 +2053,27 @@ def run_wgpu_app(
                     f"{props['r_apo']:.1f} kpc e={props['eccentricity']:.2f}",
                     "ok")
             drawer._last_orbit = (o, props)
+            # 3D orbit trail: reuse the streamline line-strip pipeline,
+            # colored by time through the active colormap, positioned
+            # back in absolute code units about the potential center.
+            try:
+                from .colormaps import colormap_to_texture_data as _ctd
+
+                kpc = units.length_to_kpc
+                trail_pts = center[None, :] + o["pos"] / kpc
+                trace = {"points": trail_pts,
+                         "values": o["t"] - o["t"].min() + 1e-6}
+                lut = _ctd(AVAILABLE_COLORMAPS[_state["_cmap_idx"]])
+                tmax = float(o["t"].max() - o["t"].min())
+                orbit_trail_renderer.set_lines(
+                    [trace], lut, 0.0, max(np.log10(max(tmax, 1e-6)), 1e-6),
+                    log_scale=False)
+                # linear time coloring: rescale manually
+                orbit_trail_renderer.set_lines(
+                    [trace], lut, 0.0, max(tmax, 1e-6), log_scale=False)
+                _orbit_trail["visible"] = True
+            except Exception:
+                pass
             drawer.refresh()
         except Exception as e:
             toasts.show(f"Orbit failed: {e}", "error")
@@ -2915,6 +2942,9 @@ def run_wgpu_app(
                 if _stream["visible"] and stream_renderer.lines:
                     stream_renderer.write_uniforms(camera)
                     stream_renderer.render_to_pass(rpass)
+                if _orbit_trail["visible"] and orbit_trail_renderer.lines:
+                    orbit_trail_renderer.write_uniforms(camera)
+                    orbit_trail_renderer.render_to_pass(rpass)
                 if arrow_renderer.n_instances > 0:
                     arrow_renderer.write_uniforms(camera)
                     arrow_renderer.render_to_pass(rpass)

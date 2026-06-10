@@ -47,17 +47,19 @@ STATUS_STYLE = PanelStyle(
     radius=10,
 )
 
+from .themes import DarkTheme as _DT
+
 TOAST_STYLE = PanelStyle(
     font_size=20, line_height=30, margin=10, min_width=10,
-    bg_color=(18, 22, 34, 222),
-    text_color=(232, 236, 244, 255),
-    accent_color=(120, 200, 140, 255),
-    toggle_on_color=(120, 200, 140, 255),
-    toggle_off_color=(200, 120, 120, 255),
-    dropdown_bg=(34, 37, 50, 255),
-    dropdown_hover=(80, 100, 140, 255),
-    slider_btn=(64, 70, 88, 255),
-    position="top-center",
+    bg_color=_DT.BG_SURFACE,
+    text_color=_DT.TEXT_PRIMARY,
+    accent_color=_DT.SUCCESS,
+    toggle_on_color=_DT.SUCCESS,
+    toggle_off_color=_DT.DANGER,
+    dropdown_bg=_DT.BG_RAISED,
+    dropdown_hover=_DT.ACCENT_DIM,
+    slider_btn=_DT.BG_RAISED,
+    position="bottom-right",
     font_family="sans-serif",
     radius=12,
 )
@@ -79,9 +81,9 @@ GIZMO_STYLE = PanelStyle(
 
 DRAWER_STYLE = PanelStyle(
     font_size=20, line_height=30, margin=12, min_width=360,
-    bg_color=(14, 16, 26, 235),
-    text_color=(228, 231, 238, 255),
-    accent_color=(100, 180, 255, 255),
+    bg_color=(19, 24, 31, 235),          # DarkTheme.BG_SURFACE @ panel alpha
+    text_color=(232, 237, 243, 255),     # DarkTheme.TEXT_PRIMARY
+    accent_color=(61, 126, 255, 255),    # DarkTheme.ACCENT
     toggle_on_color=(100, 180, 255, 255),
     toggle_off_color=(110, 115, 130, 255),
     dropdown_bg=(34, 37, 50, 255),
@@ -237,18 +239,27 @@ class ToastOverlay(Panel):
     texture only when the visible set changes (or during fade-out).
     """
 
-    DURATION = 3.2
-    FADE = 0.6
+    DURATION = 4.0
+    FADE = 0.5       # fade-out window (s)
+    FADE_IN = 0.2    # fade-in window (s)
+    MAX_TOASTS = 5
 
     def __init__(self):
         super().__init__(TOAST_STYLE)
         self.enabled = True
-        self._toasts = []  # (text, t_expire, kind)
+        self.anchor_offset = (0, -90)  # clear the status bar + gizmo
+        self._toasts = []  # (text, t_expire, kind, t_created)
 
     def show(self, text, kind="info", duration=None):
         now = time.time()
-        self._toasts.append((str(text), now + (duration or self.DURATION), kind))
-        self._toasts = self._toasts[-4:]
+        self._toasts.append((str(text),
+                             now + (duration or self.DURATION), kind,
+                             now))
+        self._toasts = self._toasts[-self.MAX_TOASTS:]
+
+    def push(self, message, type="info", duration_s=None):
+        """Section 6.I API: alias of show() with its naming."""
+        self.show(message, kind=type, duration=duration_s)
 
     @property
     def active(self):
@@ -259,6 +270,7 @@ class ToastOverlay(Panel):
             return
         now = time.time()
         self._toasts = [t for t in self._toasts if t[1] > now]
+        # (kept sorted by creation; expiry prunes in place)
         if not self._toasts:
             self._panel_w = self._panel_h = 0
             self._tex = None
@@ -268,7 +280,7 @@ class ToastOverlay(Panel):
         M, LH = s.margin, s.line_height
         dummy = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
         tw = 10
-        for text, _, _ in self._toasts:
+        for text, *_ in self._toasts:
             bbox = dummy.textbbox((0, 0), text, font=self._font)
             tw = max(tw, bbox[2] - bbox[0] + M * 4)
         row_h = LH + 8
@@ -283,16 +295,21 @@ class ToastOverlay(Panel):
             "error": s.toggle_off_color,
         }
         y = 0
-        for text, t_exp, kind in reversed(self._toasts):
+        for text, t_exp, kind, t_new in reversed(self._toasts):
             alpha = 1.0
             if t_exp - now < self.FADE:
                 alpha = max(0.0, (t_exp - now) / self.FADE)
+            age = now - t_new
+            if age < self.FADE_IN:
+                alpha *= age / self.FADE_IN
             bg = tuple(list(s.bg_color[:3]) + [int(s.bg_color[3] * alpha)])
             fg0 = kind_col.get(kind, s.text_color)
             fg = tuple(list(fg0[:3]) + [int(fg0[3] * alpha)])
             _rounded(draw, [(0, y + 2), (tw - 1, y + row_h - 2)], s.radius,
                      fill=bg, outline=(255, 255, 255, int(30 * alpha)))
-            draw.text((M + 6, y + 5), text, fill=fg, font=self._font)
+            # Type-colored left border strip (Section 6.I).
+            draw.rectangle([(0, y + 4), (4, y + row_h - 4)], fill=fg)
+            draw.text((M + 10, y + 5), text, fill=fg, font=self._font)
             y += row_h
 
         self._panel_w, self._panel_h = tw, th
