@@ -107,7 +107,7 @@ def make_default_app_state(data):
     Returns:
         dict with all field/mode/slot defaults.
     """
-    sd_fields = data.available_fields()
+    sd_fields = data.available_fields_with_derived()
     vector_fields = data.available_vector_fields()
     has_vel = "Velocities" in vector_fields
     return {

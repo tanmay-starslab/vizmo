@@ -131,6 +131,7 @@ def run_wgpu_app(
         # Re-derive flight speed from the framed radius so a tight zoom
         # onto one halo doesn't inherit box-scale movement speed.
         camera.speed = used_r / 5.0
+        data.set_view_center(view_center)
         print(
             f"  View centered on ({view_center[0]:.1f}, {view_center[1]:.1f}, "
             f"{view_center[2]:.1f})  r={used_r:.1f}"
@@ -915,7 +916,7 @@ def run_wgpu_app(
 
             # Refresh available scalar/vector field lists (intersection
             # across selected types).
-            _sd_fields = data.available_fields()
+            _sd_fields = data.available_fields_with_derived()
             _vector_fields = data.available_vector_fields()
             _state["_vector_fields"] = _vector_fields
             if _state["_sd_field"] not in _sd_fields:

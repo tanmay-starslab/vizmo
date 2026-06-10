@@ -1119,6 +1119,10 @@ class SnapshotData:
         # Stars (PartType5) loaded independently as point-source pool
         self._stars = "PartType5" in self._file
         self._cache = {}
+        # View center in code units (set by the app on --center /
+        # recenter). Derived fields like RadialVelocity use it; falls
+        # back to the mass-weighted median of the loaded particles.
+        self.view_center = None
         # Per-ptype computed hsml cache (only fills for types whose hsml
         # had to be computed via the KDTree fallback — cheap to keep).
         self._hsml_cache = {}
@@ -1363,6 +1367,9 @@ class SnapshotData:
         # the concatenated array length and must be dropped.
         if hasattr(self, "_projected_cache"):
             self._projected_cache = {}
+        # Derived-field entries are keyed by the old selection; drop them.
+        for key in [k for k in self._cache if k.startswith("derived/")]:
+            del self._cache[key]
 
         if not self.particle_types:
             self.positions = np.zeros((0, 3), dtype=np.float64)
@@ -1604,6 +1611,34 @@ class SnapshotData:
         rest = sorted(common - {"Masses"})
         return ["Masses"] + rest
 
+    def available_fields_with_derived(self):
+        """Raw fields plus derived physical fields computable from them."""
+        from .physics import available_derived_fields
+
+        raw = self.available_fields()
+        vec = self.available_vector_fields()
+        return raw + [f for f in available_derived_fields(raw, vec) if f not in raw]
+
+    def get_view_center(self):
+        """Current view center in code units (for derived fields)."""
+        if self.view_center is not None:
+            return np.asarray(self.view_center, dtype=np.float64)
+        from .framing import mass_weighted_median
+
+        if self.n_particles == 0:
+            return np.zeros(3)
+        c = mass_weighted_median(self.positions, self.masses)
+        self.view_center = np.asarray(c, dtype=np.float64)
+        return self.view_center
+
+    def set_view_center(self, center):
+        """Update the view center and invalidate center-dependent fields."""
+        self.view_center = (
+            None if center is None else np.asarray(center, dtype=np.float64)
+        )
+        for key in [k for k in self._cache if k.startswith("derived/@center/")]:
+            del self._cache[key]
+
     def available_vector_fields(self):
         """Vector fields common to ALL currently-selected particle types."""
         if not self.particle_types:
@@ -1628,7 +1663,28 @@ class SnapshotData:
         return np.concatenate(chunks) if len(chunks) > 1 else chunks[0]
 
     def get_field(self, name):
-        """Load a scalar field across all selected particle types. (N,) float32."""
+        """Load a scalar field across all selected particle types. (N,) float32.
+
+        Accepts raw snapshot fields and derived physical fields
+        (Temperature, NumberDensity, ... — see vizmo.physics). Derived
+        results are cached per particle-type selection; center-dependent
+        ones carry a "derived/@center/" prefix so set_view_center can
+        invalidate just those.
+        """
+        from .physics import DERIVED_FIELDS
+
+        if name in DERIVED_FIELDS and name not in self.available_fields():
+            df = DERIVED_FIELDS[name]
+            prefix = "derived/@center/" if "@center" in df.requires else "derived/"
+            key = f"{prefix}{name}/{tuple(self.particle_types)}"
+            hit = self._cache.get(key)
+            if hit is not None and len(hit) == self.n_particles:
+                return hit
+            from .physics import compute_derived_field
+
+            out = compute_derived_field(name, self)
+            self._cache[key] = out
+            return out
         return self._get_field_concat(name)
 
     def get_vector_field(self, name):
