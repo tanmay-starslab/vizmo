@@ -165,6 +165,35 @@ sphere, box, cylinder, slab, cone, ellipsoid primitives with boolean
 union / intersect / subtract composition (vizmo.selection), JSON
 persistence — the geometric base for multi-shape apertures.
 
+**Multi-shape apertures**: while placing (`M`), `Tab` cycles
+sphere / cylinder / box / slab / cone / ellipsoid (each with its own
+ring color); axis shapes orient along the camera. Center refinement
+offers densest / potential / shrinking-sphere / CoM / FoF most-massive
+group / stellar CoM.
+
+**Orbit integration** (`O`): Shift+click a particle, press Compute —
+an NFW potential is fit to the aperture's enclosed-mass profile and
+the orbit integrated with DOP853 (energy-conserving to 0.1%); the
+panel plots the time-colored trajectory + r(t) and reports
+apo/peri/eccentricity/period/circularity. Stream releases Jacobi-
+radius tracers; CSV exports the trail. pytreegrav supported when
+installed.
+
+**Absorption sightlines** (`Shift+A`): click two particles — exact
+kernel-integrated N_H and N_HI (M4 projected kernel, normalization
+verified to 0.2%) plus clearly-labelled CIE-approximate O VI / C IV /
+Mg II columns appear instantly; segments render as labelled overlay
+lines; the sightline panel lists everything with CSV export and a
+background **Trident** launcher for real spectra (polled, toasted).
+
+**Snapshot series** (`vizmo ./snapdir/ --series`): Left/Right arrows
+step through time with the center re-tracked and the camera carried
+over; Subfind/Rockstar catalogs load via vizmo.catalog.
+
+**Exports**: LaTeX stats tables (TeX button), dependency-free VTU for
+ParaView, and `Ctrl+Shift+E` bundles every computed product (profiles,
+stats JSON + TeX, phase FITS, sightline columns, README) into one ZIP.
+
 **Field filters** (`F`, or toolbar **Filters**): Firefly-style range
 cuts on any raw or derived field — e.g. show only gas with
 T < 3x10^4 K, or only inflowing material (RadialVelocity < 0).
