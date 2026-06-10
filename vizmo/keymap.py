@@ -35,6 +35,7 @@ KEYBINDINGS = [
     ("Shift+V", "Streamlines: compute / toggle visibility"),
     ("Shift+B", "Magnetic field arrows (MHD snapshots)"),
     ("Shift+W", "Volume rendering: compute / toggle MIP"),
+    ("Ctrl+R", "Regions panel: boolean multi-region scopes"),
     ("Tab (aperture)", "Cycle aperture shape (sphere/cyl/box/slab/cone/ellipsoid)"),
     ("M", "Aperture mode: click=center, scroll=size, M again=set"),
     ("Shift+M", "Clear aperture (analysis back to global scope)"),

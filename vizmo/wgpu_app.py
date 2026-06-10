@@ -389,6 +389,11 @@ def run_wgpu_app(
     stream_renderer = StreamlineRenderer(device, present_format)
     arrow_renderer = ArrowRenderer(device, present_format)
     volume_renderer = VolumeRenderer(device, present_format)
+    from .regions_panel import RegionSet, MaskRegion
+
+    region_set = RegionSet()
+    drawer.region_set = region_set
+
     orbit_trail_renderer = StreamlineRenderer(device, present_format)
     _orbit_trail = {"visible": False}
     _stream = {"n_seeds": 256, "step_mult": 1.0, "max_steps": 200,
@@ -1073,6 +1078,8 @@ def run_wgpu_app(
                         f"right=slot1 (edit via Composite controls)")
                 else:
                     toasts.show("Split screen off")
+            elif key == glfw.KEY_R and (mods & glfw.MOD_CONTROL):
+                drawer.toggle("regions")
             elif key == glfw.KEY_F9:
                 vis = not scale_bar.enabled
                 scale_bar.enabled = vis
@@ -1377,6 +1384,58 @@ def run_wgpu_app(
                     scale_bar._last_key = None
                     app_proxy._apply_render_mode(auto_range=False)
                     toasts.show("View center moved to picked particle", "ok")
+                elif dr_action in ("rg_add", "rg_op", "rg_del",
+                                   "rg_submit", "rg_save", "rg_load"):
+                    try:
+                        if dr_action == "rg_add":
+                            if _aperture["center"] is None:
+                                toasts.show(
+                                    "Place an aperture first (M)", "warn")
+                            else:
+                                region_set.add(_build_aperture_region())
+                                toasts.show(
+                                    f"Region {len(region_set.entries)} "
+                                    f"added", "ok")
+                        elif dr_action == "rg_op" and region_set.entries:
+                            region_set.cycle_op(
+                                len(region_set.entries) - 1)
+                        elif dr_action == "rg_del" and region_set.entries:
+                            region_set.remove(len(region_set.entries) - 1)
+                        elif dr_action == "rg_submit":
+                            if not region_set.entries:
+                                toasts.show("No regions to submit", "warn")
+                            else:
+                                mask_region = MaskRegion(region_set)
+                                first = region_set.entries[0]["region"]
+                                c0 = getattr(first, "center",
+                                             getattr(first, "apex", None))
+                                if c0 is None:
+                                    c0 = data.get_view_center()
+                                r_kpc = (_aperture["radius"]
+                                         * units.length_to_kpc
+                                         if _aperture["radius"]
+                                         else 100.0)
+                                drawer.set_scope(np.asarray(c0), r_kpc,
+                                                 "regions",
+                                                 region=mask_region)
+                                n_in = int(mask_region.contains(
+                                    data.positions[::100]).sum()) * 100
+                                toasts.show(
+                                    f"Boolean scope active (~{n_in:,} "
+                                    f"particles)", "ok")
+                        elif dr_action == "rg_save":
+                            out = region_set.save(snapshot_path)
+                            toasts.show(
+                                f"Regions saved: "
+                                f"{os.path.basename(out)}", "ok")
+                        elif dr_action == "rg_load":
+                            region_set.load(snapshot_path)
+                            toasts.show(
+                                f"{len(region_set.entries)} regions "
+                                f"loaded", "ok")
+                    except Exception as e:
+                        toasts.show(f"Regions: {e}", "error")
+                    drawer.refresh()
                 elif dr_action in ("sl_compute", "sl_seeds_down",
                                    "sl_seeds_up", "sl_step", "sl_field",
                                    "sl_surface"):

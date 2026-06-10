@@ -1029,7 +1029,8 @@ class AnalysisDrawer(Panel):
                   "slice": "Slice plane",
                   "isosurface": "Isosurface",
                   "streamlines": "Streamlines",
-                  "volume": "Volume rendering"}
+                  "volume": "Volume rendering",
+                  "regions": "Regions (boolean)"}
         title = titles.get(self.mode, "")
 
         plot_img, caption = (None, "")
@@ -1061,6 +1062,17 @@ class AnalysisDrawer(Panel):
             ]
             if props.get("circularity") is not None:
                 rows.append(("circularity", f"{props['circularity']:+.2f}"))
+        elif self.mode == "regions":
+            rs = getattr(self, "region_set", None)
+            if rs is None or not rs.entries:
+                rows = [("No regions", "place aperture (M), then Add")]
+            else:
+                rows = []
+                for i, e in enumerate(rs.entries):
+                    op = "    " if i == 0 else f"{e['op']:>4s}"
+                    shape = e["region"].kind[0].upper()
+                    rows.append((f"{op} [{shape}] {e['name']}",
+                                 "on" if e["visible"] else "off"))
         elif self.mode == "streamlines":
             st = getattr(self, "stream_state", None) or {}
             rows = [
@@ -1304,6 +1316,14 @@ class AnalysisDrawer(Panel):
             bx = fbtn(bx, "Compute", "orbit_compute")
             bx = fbtn(bx, "CSV", "orbit_csv")
             bx = fbtn(bx, "Stream", "orbit_stream")
+        elif self.mode == "regions":
+            bx = M
+            bx = fbtn(bx, "Add", "rg_add")
+            bx = fbtn(bx, "Op", "rg_op")
+            bx = fbtn(bx, "Del", "rg_del")
+            bx = fbtn(bx, "Submit", "rg_submit")
+            bx = fbtn(bx, "Save", "rg_save")
+            bx = fbtn(bx, "Load", "rg_load")
         elif self.mode == "streamlines":
             bx = M
             bx = fbtn(bx, "Go", "sl_compute")
