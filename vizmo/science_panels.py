@@ -527,6 +527,45 @@ class AnalysisDrawer(Panel):
         # aperture tool; every tool computes within it when use_scope.
         self.scope = None
         self.use_scope = True
+        # Filters tool state: candidate-field index for "Add" and a
+        # per-field percentile cache (0..100, subsampled) used for
+        # robust range nudging on wildly log-distributed fields.
+        self._filter_field_idx = 0
+        self._pctiles = {}
+
+    # -- filters helpers -----------------------------------------------------
+
+    FILTER_CANDIDATES = ["Temperature", "NumberDensity", "Density",
+                         "RadialVelocity", "VelocityMagnitude",
+                         "MetallicityZsun", "RadiusFromCenter",
+                         "StarFormationRate", "Masses"]
+
+    def _filter_fields(self, data):
+        avail = data.available_fields_with_derived()
+        out = [f for f in self.FILTER_CANDIDATES if f in avail]
+        out += [f for f in avail if f not in out]
+        return out
+
+    def _percentiles(self, data, field):
+        key = (field, data.n_particles)
+        if key not in self._pctiles:
+            vals = np.asarray(data.get_field(field), dtype=np.float64)
+            n = len(vals)
+            if n > 2_000_000:
+                rng = np.random.default_rng(0)
+                vals = vals[rng.choice(n, size=2_000_000, replace=False)]
+            vals = vals[np.isfinite(vals)]
+            if vals.size == 0:
+                vals = np.zeros(1)
+            self._pctiles[key] = np.percentile(vals, np.arange(101))
+        return self._pctiles[key]
+
+    @staticmethod
+    def _fmt_val(v):
+        a = abs(v)
+        if a != 0 and (a >= 1e4 or a < 1e-2):
+            return f"{v:.2e}"
+        return f"{v:.4g}"
 
     def set_scope(self, center, radius_kpc, center_mode="densest"):
         self.scope = {
@@ -665,8 +704,100 @@ class AnalysisDrawer(Panel):
 
     # -- drawing ------------------------------------------------------------
 
+    def _update_filters(self, data):
+        """Custom layout for the filters tool: one card per active
+        filter (field, live range, nudge buttons) + an add row."""
+        s = self.style
+        M, LH = s.margin, s.line_height
+        self._buttons = []
+        filters = data.filters
+        fields = self._filter_fields(data)
+        self._filter_field_idx %= max(len(fields), 1)
+        cand = fields[self._filter_field_idx] if fields else "?"
+
+        key = ("filters", tuple((f["field"], round(f["lo"], 6), round(f["hi"], 6))
+                                for f in filters),
+               cand, self._fb_width, self._fb_height)
+        if key == self._last_key and self._tex is not None:
+            return
+        self._last_key = key
+
+        dummy = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
+        tw = max(s.min_width, int(430 * max(0.6, self._dpi_scale) * 1.2))
+        header_h = LH + 10
+        row_h = 2 * LH + 10
+        th = header_h + row_h * max(len(filters), 0) + LH + 18 + M
+        if not filters:
+            th += LH
+
+        img = Image.new("RGBA", (tw, th), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(img)
+        _rounded(draw, [(0, 0), (tw - 1, th - 1)], s.radius, fill=s.bg_color,
+                 outline=(255, 255, 255, 30))
+        draw.text((M, 6), "Field filters", fill=s.accent_color, font=self._font)
+        cw = LH - 6
+        cx0, cy0 = tw - M - cw, 5
+        _rounded(draw, [(cx0, cy0), (cx0 + cw, cy0 + cw)], 6,
+                 fill=(60, 34, 40, 255), outline=(255, 255, 255, 40))
+        draw.line([(cx0 + 6, cy0 + 6), (cx0 + cw - 6, cy0 + cw - 6)],
+                  fill=(235, 160, 160, 255), width=2)
+        draw.line([(cx0 + cw - 6, cy0 + 6), (cx0 + 6, cy0 + cw - 6)],
+                  fill=(235, 160, 160, 255), width=2)
+        self._buttons.append((cx0, cy0, cx0 + cw, cy0 + cw, "close"))
+        draw.line([(M, header_h - 2), (tw - M, header_h - 2)],
+                  fill=(255, 255, 255, 30), width=1)
+
+        def btn(x, y, label, action, w=None, fill=None):
+            bb = dummy.textbbox((0, 0), label, font=self._font)
+            bw = w if w is not None else bb[2] - bb[0] + 18
+            _rounded(draw, [(x, y), (x + bw, y + LH - 4)], 7,
+                     fill=fill or s.slider_btn, outline=(255, 255, 255, 45))
+            draw.text((x + (bw - bb[2] + bb[0]) // 2, y - 2), label,
+                      fill=s.text_color, font=self._font)
+            self._buttons.append((x, y, x + bw, y + LH - 4, action))
+            return bw
+
+        y = header_h + 6
+        if not filters:
+            draw.text((M, y), "No filters active", fill=(168, 174, 188, 255),
+                      font=self._font)
+            y += LH
+        for i, f in enumerate(filters):
+            draw.text((M, y), f["field"], fill=s.text_color, font=self._font)
+            bx = tw - M - (LH - 4)
+            btn(bx, y + 2, "x", ("f_del", i), w=LH - 4,
+                fill=(60, 34, 40, 255))
+            y += LH
+            bx = M
+            bx += btn(bx, y + 2, "-", ("f_lo", i, -5), w=LH) + 4
+            bx += btn(bx, y + 2, "+", ("f_lo", i, +5), w=LH) + 10
+            rng_txt = f"{self._fmt_val(f['lo'])} .. {self._fmt_val(f['hi'])}"
+            draw.text((bx, y), rng_txt, fill=(168, 174, 188, 255),
+                      font=self._font)
+            bb = dummy.textbbox((0, 0), rng_txt, font=self._font)
+            bx += bb[2] - bb[0] + 10
+            bx += btn(bx, y + 2, "-", ("f_hi", i, -5), w=LH) + 4
+            btn(bx, y + 2, "+", ("f_hi", i, +5), w=LH)
+            y += LH + 10
+
+        # Add row: cycle candidate field, then add at [5th, 95th] pct.
+        bx = M
+        bx += btn(bx, y + 2, "<", ("f_field", -1), w=LH + 6) + 6
+        cand_w = int(tw * 0.42)
+        draw.text((bx + 4, y), cand, fill=s.text_color, font=self._font)
+        bx += cand_w
+        bx += btn(bx, y + 2, ">", ("f_field", +1), w=LH + 6) + 10
+        btn(bx, y + 2, "Add", ("f_add", cand), fill=(40, 62, 90, 255))
+
+        self._panel_w, self._panel_h = tw, th
+        self._panel_x, self._panel_y = self._panel_origin(tw, th)
+        self._upload_panel(tw, th, img.tobytes())
+
     def update(self, data):
         if not self.enabled or self.mode is None:
+            return
+        if self.mode == "filters":
+            self._update_filters(data)
             return
         from . import analysis
 
@@ -878,6 +1009,11 @@ class AnalysisDrawer(Panel):
                 if action == "toggle_scope":
                     self.use_scope = not self.use_scope
                     self.refresh()
+                    return True
+                if (isinstance(action, tuple) and action
+                        and action[0] == "f_field"):
+                    self._filter_field_idx += action[1]
+                    self._last_key = None
                     return True
                 return action
         return True

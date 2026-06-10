@@ -1003,6 +1003,7 @@ class ToolbarOverlay(Panel):
                 ("Phase", "phase", drawer_mode == "phase"),
                 ("Profile", "profile", drawer_mode == "profile"),
                 ("Stats", "stats", drawer_mode == "stats"),
+                ("Filters", "filters", drawer_mode == "filters"),
                 ("Aperture", "aperture", aperture),
                 ("Orbit", "orbit", orbiting),
                 ("Cutout", "export_region"),

@@ -41,6 +41,7 @@ def run_wgpu_app(
     screenshot_dir=None,
     field=None,
     mode=None,
+    filters=None,
 ):
     """Run the vizmo application with the wgpu backend.
 
@@ -331,7 +332,20 @@ def run_wgpu_app(
         else:
             _sd_field = field or _sd_field
         print(f"  Startup view: {eff_mode}({field or _sd_field})")
-    _startup_view_pending = field is not None or mode is not None
+    # --filter FIELD:LO:HI (repeatable)
+    if filters:
+        parsed = []
+        for spec in filters:
+            try:
+                fname, lo, hi = spec.rsplit(":", 2)
+                parsed.append({"field": fname, "lo": float(lo), "hi": float(hi)})
+            except ValueError:
+                print(f"  Bad --filter spec {spec!r} (want FIELD:LO:HI); ignored")
+        if parsed:
+            data.set_filters(parsed)
+            print(f"  {len(parsed)} filter(s) active")
+    _startup_view_pending = (field is not None or mode is not None
+                             or bool(data.filters))
 
     # Stars
     if no_stars:
@@ -493,6 +507,8 @@ def run_wgpu_app(
                 drawer.toggle("stats")
             elif key == glfw.KEY_I:
                 drawer.toggle("inspector")
+            elif key == glfw.KEY_F:
+                drawer.toggle("filters")
             elif key == glfw.KEY_M:
                 if mods & glfw.MOD_SHIFT:
                     # Shift+M: drop the aperture, back to global scope.
@@ -608,6 +624,12 @@ def run_wgpu_app(
         "_composite": _composite,
     }
 
+    def _apply_filters(w):
+        """Zero the weights of particles excluded by active filters."""
+        if data.filters:
+            return (w * data.filter_mask()).astype(np.float32)
+        return w
+
     class _AppProxy:
         """Live proxy that reads/writes shared state dict."""
 
@@ -651,9 +673,10 @@ def run_wgpu_app(
 
         def _compute_slot(self, slot):
             """Compute weights and qty for a composite slot dict."""
-            return compute_slot_fields(
+            w, q = compute_slot_fields(
                 slot, _state["_vector_fields"], data, camera.forward, camera_position=camera.position
             )
+            return _apply_filters(w), q
 
         def _apply_render_mode(self, auto_range=True):
             nonlocal _render_mode, needs_auto_range
@@ -686,7 +709,7 @@ def run_wgpu_app(
                 _render_mode = RenderMode.surface_density(_state["_sd_field"])
                 renderer.resolve_mode = 0
 
-            renderer.update_weights(weights, qty)
+            renderer.update_weights(_apply_filters(weights), qty)
             print(
                 f"  [diag] mode={mode} n_total={renderer.n_total} "
                 f"n_particles={renderer.n_particles} "
@@ -801,6 +824,9 @@ def run_wgpu_app(
                     scale_bar._last_key = None
                     app_proxy._apply_render_mode(auto_range=False)
                     toasts.show("View center moved to picked particle", "ok")
+                elif (isinstance(dr_action, tuple) and dr_action
+                        and str(dr_action[0]).startswith("f_")):
+                    _handle_filter_action(dr_action)
                 elif dr_action == "cycle_center" and _aperture["active"]:
                     from .analysis import CENTER_MODES
 
@@ -822,7 +848,8 @@ def run_wgpu_app(
                     _export_publication()
                 elif tb_action == "record":
                     _toggle_recording()
-                elif tb_action in ("inspector", "phase", "profile", "stats"):
+                elif tb_action in ("inspector", "phase", "profile", "stats",
+                                   "filters"):
                     if tb_action == "stats":
                         drawer.refresh()
                     drawer.toggle(tb_action)
@@ -1053,7 +1080,7 @@ def run_wgpu_app(
         if w2_name != "None":
             w2 = resolve_field(w2_name, vf, data, proj, camera.forward, camera_position=camera.position)
             w = combine_fields(w, w2, sl.get("op", "*"))
-        sm = w.astype(np.float32)
+        sm = _apply_filters(w.astype(np.float32))
 
         if sl["mode"] in ("WeightedAverage", "WeightedVariance"):
             q = resolve_field(sl["data"], vf, data, proj, camera.forward, camera_position=camera.position)
@@ -1214,6 +1241,55 @@ def run_wgpu_app(
             toasts.show(f"Cutout saved: {n:,} particles", "ok")
         except Exception as e:
             toasts.show(f"Cutout export failed: {e}", "error")
+
+    def _handle_filter_action(action):
+        """Mutate data.filters from a drawer action and re-render.
+
+        Ranges nudge in percentile space (5-point steps from a cached
+        subsampled percentile table) so the controls behave sensibly on
+        wildly log-distributed fields.
+        """
+        kind = action[0]
+        filters = list(data.filters)
+        if kind == "f_add":
+            field = action[1]
+            pct = drawer._percentiles(data, field)
+            filters.append({"field": field, "lo": float(pct[5]),
+                            "hi": float(pct[95]), "plo": 5, "phi": 95})
+        elif kind == "f_del":
+            i = action[1]
+            if 0 <= i < len(filters):
+                filters.pop(i)
+        elif kind in ("f_lo", "f_hi"):
+            i, step = action[1], action[2]
+            if not (0 <= i < len(filters)):
+                return
+            f = filters[i]
+            pct = drawer._percentiles(data, f["field"])
+            if kind == "f_lo":
+                f["plo"] = int(np.clip(f.get("plo", 5) + step, 0,
+                                       f.get("phi", 95) - 1))
+                f["lo"] = float(pct[f["plo"]])
+            else:
+                f["phi"] = int(np.clip(f.get("phi", 95) + step,
+                                       f.get("plo", 5) + 1, 100))
+                f["hi"] = float(pct[f["phi"]])
+        else:
+            return
+        data.set_filters(filters)
+        try:
+            app_proxy._apply_render_mode(auto_range=False)
+        except Exception as e:
+            toasts.show(f"Filter apply failed: {e}", "error")
+            return
+        drawer.refresh()
+        if filters:
+            n_vis = int(data.filter_mask().sum())
+            toasts.show(
+                f"Filters: {n_vis/1e6:.2f}M / {data.n_particles/1e6:.1f}M "
+                f"particles pass", "ok")
+        else:
+            toasts.show("Filters cleared", "ok")
 
     print("vizmo [wgpu] running. WASD=move, mouse=look, F1/H=help, ESC=quit, R=auto-range, P=screenshot.")
 

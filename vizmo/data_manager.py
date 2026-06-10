@@ -1123,6 +1123,11 @@ class SnapshotData:
         # recenter). Derived fields like RadialVelocity use it; falls
         # back to the mass-weighted median of the loaded particles.
         self.view_center = None
+        # Firefly-style field filters: list of dicts
+        # {"field": name, "lo": float, "hi": float}. Particles outside
+        # any range render with zero weight (see filter_mask()).
+        self.filters = []
+        self._filter_mask_cache = None
         # Per-ptype computed hsml cache (only fills for types whose hsml
         # had to be computed via the KDTree fallback — cheap to keep).
         self._hsml_cache = {}
@@ -1370,6 +1375,7 @@ class SnapshotData:
         # Derived-field entries are keyed by the old selection; drop them.
         for key in [k for k in self._cache if k.startswith("derived/")]:
             del self._cache[key]
+        self._filter_mask_cache = None
 
         if not self.particle_types:
             self.positions = np.zeros((0, 3), dtype=np.float64)
@@ -1638,6 +1644,34 @@ class SnapshotData:
         )
         for key in [k for k in self._cache if k.startswith("derived/@center/")]:
             del self._cache[key]
+        if any(f["field"] in ("RadialVelocity", "RadiusFromCenter")
+               for f in self.filters):
+            self._filter_mask_cache = None
+
+    def set_filters(self, filters):
+        """Replace the active field filters and invalidate the mask."""
+        self.filters = list(filters)
+        self._filter_mask_cache = None
+
+    def filter_mask(self):
+        """(N,) float32 0/1 mask: 1 where the particle passes every
+        active filter. All-ones when no filters are set."""
+        if not self.filters:
+            return np.ones(self.n_particles, dtype=np.float32)
+        cached = self._filter_mask_cache
+        if cached is not None and len(cached) == self.n_particles:
+            return cached
+        mask = np.ones(self.n_particles, dtype=bool)
+        for f in self.filters:
+            try:
+                vals = np.asarray(self.get_field(f["field"]))
+            except Exception:
+                continue
+            with np.errstate(invalid="ignore"):
+                mask &= (vals >= f["lo"]) & (vals <= f["hi"])
+        out = mask.astype(np.float32)
+        self._filter_mask_cache = out
+        return out
 
     def available_vector_fields(self):
         """Vector fields common to ALL currently-selected particle types."""

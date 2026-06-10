@@ -80,6 +80,14 @@ def main():
         "WeightedAverage is implied when --field is a non-mass field)",
     )
     parser.add_argument(
+        "--filter",
+        action="append",
+        default=None,
+        metavar="FIELD:LO:HI",
+        help="Particle filter, e.g. Temperature:0:3e4 (repeatable; "
+        "particles outside any range render with zero weight)",
+    )
+    parser.add_argument(
         "--profile",
         type=str,
         default=None,
@@ -123,6 +131,7 @@ def main():
                 screenshot_dir=args.screenshot_dir,
                 field=args.field,
                 mode=args.mode,
+                filters=args.filter,
             )
         finally:
             pr.disable()
@@ -149,6 +158,7 @@ def main():
             screenshot_dir=args.screenshot_dir,
             field=args.field,
             mode=args.mode,
+            filters=args.filter,
         )
 
 
