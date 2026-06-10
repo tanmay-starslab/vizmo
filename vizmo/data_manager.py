@@ -919,7 +919,10 @@ def _zams_luminosity(mass_msun):
 
 
 def _hsml_field_names():
-    return ("SmoothingLength", "KernelMaxRadius", "Hsml")
+    # SubfindHsml / StellarHsml are TNG/AREPO neighbor-sphere radii — not
+    # SPH smoothing lengths, but fine as visualization kernel radii and
+    # far cheaper than the KDTree recompute for multi-10M-particle types.
+    return ("SmoothingLength", "KernelMaxRadius", "Hsml", "StellarHsml", "SubfindHsml")
 
 
 def _compute_hsml_kdtree(positions, boxsize=None, n_neighbors=50,
@@ -1413,6 +1416,24 @@ class SnapshotData:
         self._hsml_cache[p] = h
         return h
 
+    def _masses_from_masstable(self, ptype, grp):
+        """Synthesize a per-particle Masses array from the header MassTable.
+
+        Returns None when the header has no usable entry for this type.
+        """
+        mt = self.header.get("MassTable", None)
+        if mt is None:
+            return None
+        try:
+            p = int(ptype.replace("PartType", ""))
+        except ValueError:
+            return None
+        mt = np.asarray(mt).ravel()
+        if p >= len(mt) or not float(mt[p]) > 0:
+            return None
+        n = grp["Coordinates"].shape[0]
+        return np.full(n, float(mt[p]), dtype=np.float32)
+
     def _read_field(self, ptype, field):
         """Read a field with fallback name resolution."""
         key = f"{ptype}/{field}"
@@ -1431,6 +1452,11 @@ class SnapshotData:
                     data = grp[fallback][:]
                     found = True
                     break
+            if not found and field == "Masses":
+                # Gadget/AREPO/TNG store uniform per-type masses in the
+                # header MassTable instead of a per-particle dataset.
+                data = self._masses_from_masstable(ptype, grp)
+                found = data is not None
             if not found:
                 raise KeyError(f"Field {field} (and fallbacks) not found in {ptype}")
 
@@ -1452,7 +1478,7 @@ class SnapshotData:
             data = data * a / hubble
         elif field == "Masses":
             data = data / hubble
-        elif field in ("KernelMaxRadius", "SmoothingLength", "Hsml"):
+        elif field in _hsml_field_names():
             data = data * a / hubble
         return data
 
