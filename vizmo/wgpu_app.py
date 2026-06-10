@@ -151,6 +151,16 @@ def run_wgpu_app(
         # Default the multiplier to 1 so the physical scaling shows as-is.
         renderer.star_world_radius = 1.0
 
+    # Persisted user settings (colormap, mouse, target FPS). CLI flags
+    # take precedence over saved values.
+    from .session import load_settings, save_settings
+
+    _settings = load_settings()
+    if colormap is None and _settings.get("colormap") in AVAILABLE_COLORMAPS:
+        colormap = _settings["colormap"]
+    if "invert_mouse" in _settings:
+        camera.invert_mouse = bool(_settings["invert_mouse"])
+
     # Colormap
     start_cmap = colormap if colormap in AVAILABLE_COLORMAPS else (colormap or "magma")
     try:
@@ -160,6 +170,11 @@ def run_wgpu_app(
         start_cmap = "magma"
         rgba = colormap_to_texture_data(start_cmap)
     renderer.set_colormap(rgba)
+    if "target_fps" in _settings:
+        try:
+            renderer.target_fps = float(_settings["target_fps"])
+        except (TypeError, ValueError):
+            pass
     # Sink-marker colormap. Independent default; user picks the active
     # colour field from the sink panel (default "None" → black fill).
     sink_rgba = colormap_to_texture_data(renderer.sink_cmap_name)
@@ -843,7 +858,15 @@ def run_wgpu_app(
             n_vis = renderer.n_particles
             n_tot = renderer.n_total
             init_msg = " | Initializing GPU..." if gpu_compute is None else ""
-            glfw.set_window_title(window, f"vizmo [wgpu] | {fps:.0f} fps | {n_vis/1e6:.1f}M/{n_tot/1e6:.1f}M{init_msg}")
+            rec_msg = f" | REC {_recording['frame']}" if _recording["dir"] is not None else ""
+            snap_name = os.path.basename(snapshot_path)
+            glfw.set_window_title(
+                window,
+                f"vizmo — {snap_name} | {fps:.0f} fps | "
+                f"{n_vis/1e6:.1f}M/{n_tot/1e6:.1f}M | "
+                f"fov {camera.fov:.0f}° | spd {camera.speed:.3g} | "
+                f"{AVAILABLE_COLORMAPS[_state['_cmap_idx']]}{rec_msg}{init_msg}",
+            )
 
         glfw.poll_events()
 
@@ -1375,6 +1398,19 @@ def run_wgpu_app(
         # camera is still, so the movie has constant pacing.
         dirty = _recording["dir"] is not None
         ui_dirty = False
+
+    # Persist user-tunable settings for the next session.
+    try:
+        _settings.update(
+            {
+                "colormap": AVAILABLE_COLORMAPS[_state["_cmap_idx"]],
+                "invert_mouse": bool(camera.invert_mouse),
+                "target_fps": float(renderer.target_fps),
+            }
+        )
+        save_settings(_settings)
+    except Exception as e:
+        print(f"  Settings save skipped: {e}")
 
     # Cleanup
     renderer.release()
