@@ -38,6 +38,11 @@ class Camera:
         self._mouse_captured = False
         self._moving = False
 
+        # Eased fly-to transition state (None when inactive)
+        self._transition = None
+        # Orbit autopilot: dict(center, axis, radius, angular_speed) or None
+        self.orbit = None
+
     def _recompute_basis(self):
         """Recompute and cache the orthonormal basis vectors."""
         f = self._forward / np.linalg.norm(self._forward)
@@ -118,7 +123,19 @@ class Camera:
         if glfw.KEY_X in self._keys:
             velocity -= self.up
 
-        if np.dot(velocity, velocity) > 0:
+        manual = np.dot(velocity, velocity) > 0
+        # Any manual flight cancels autopilot (transition or orbit).
+        if manual:
+            self._transition = None
+            self.orbit = None
+
+        if self._transition is not None and self._advance_transition(dt):
+            return True
+        if self.orbit is not None and not manual:
+            self._advance_orbit(dt)
+            return True
+
+        if manual:
             velocity = velocity / np.linalg.norm(velocity) * self.speed * dt
             self.position += velocity
             self._moving = True
@@ -162,10 +179,118 @@ class Camera:
         self._last_cursor = (xpos, ypos)
 
         if abs(dx) > 0 or abs(dy) > 0:
+            # Mouse-look takes over from any autopilot.
+            self._transition = None
+            self.orbit = None
             sign = -1.0 if self.invert_mouse else 1.0
             self._yaw(-dx * self.mouse_sensitivity * sign)
             self._pitch(-dy * self.mouse_sensitivity * sign)
             self._moving = True
+
+    # ------------------------------------------------------------------
+    # Autopilot: eased fly-to transitions and orbit mode
+    # ------------------------------------------------------------------
+
+    def fly_to(self, position=None, look_at=None, forward=None, up=None,
+               duration=1.0):
+        """Begin a smooth (smoothstep-eased) transition.
+
+        Any of position / orientation may be supplied; omitted parts
+        keep their current value. `look_at` wins over `forward`.
+        """
+        end_pos = (np.asarray(position, dtype=np.float64)
+                   if position is not None else self.position.copy())
+        if look_at is not None:
+            d = np.asarray(look_at, dtype=np.float64) - end_pos
+            n = np.linalg.norm(d)
+            end_fwd = (d / n).astype(np.float32) if n > 0 else self.forward.copy()
+        elif forward is not None:
+            end_fwd = np.asarray(forward, dtype=np.float32)
+            end_fwd = end_fwd / max(np.linalg.norm(end_fwd), 1e-30)
+        else:
+            end_fwd = self.forward.copy()
+        if up is not None:
+            end_up = np.asarray(up, dtype=np.float32)
+        else:
+            end_up = self._up.copy()
+        # Degenerate up (parallel to forward): pick any perpendicular.
+        if abs(float(np.dot(end_up / max(np.linalg.norm(end_up), 1e-30),
+                            end_fwd))) > 0.999:
+            end_up = (np.array([0, 0, 1], dtype=np.float32)
+                      if abs(end_fwd[2]) < 0.9
+                      else np.array([0, 1, 0], dtype=np.float32))
+        self.orbit = None
+        self._transition = {
+            "t": 0.0,
+            "duration": max(float(duration), 1e-3),
+            "p0": self.position.copy(),
+            "p1": end_pos,
+            "f0": self.forward.copy(),
+            "f1": end_fwd,
+            "u0": self.up.copy(),
+            "u1": end_up,
+        }
+
+    @property
+    def in_transit(self):
+        return self._transition is not None
+
+    def _advance_transition(self, dt):
+        tr = self._transition
+        tr["t"] += dt
+        s = min(tr["t"] / tr["duration"], 1.0)
+        e = s * s * (3.0 - 2.0 * s)  # smoothstep
+        self.position = tr["p0"] * (1.0 - e) + tr["p1"] * e
+
+        def nlerp(v0, v1, w):
+            v = v0 * (1.0 - w) + v1 * w
+            n = np.linalg.norm(v)
+            # Antiparallel midpoint: fall back to the end vector.
+            return (v / n) if n > 1e-6 else v1
+
+        self._forward = nlerp(tr["f0"], tr["f1"], e)
+        self._up = nlerp(tr["u0"], tr["u1"], e)
+        self._dirty = True
+        if s >= 1.0:
+            self._transition = None
+        return True
+
+    def start_orbit(self, center, angular_speed=0.25):
+        """Begin orbiting `center` at the current radius and elevation,
+        rotating about the current up axis. Returns False when the
+        camera sits on the center (no orbit radius)."""
+        center = np.asarray(center, dtype=np.float64)
+        rel = self.position - center
+        if np.linalg.norm(rel) <= 0:
+            return False
+        self._transition = None
+        self.orbit = {
+            "center": center,
+            "axis": self.up.astype(np.float64).copy(),
+            "angular_speed": float(angular_speed),
+        }
+        return True
+
+    def stop_orbit(self):
+        self.orbit = None
+
+    def _advance_orbit(self, dt):
+        ob = self.orbit
+        axis = ob["axis"]
+        theta = ob["angular_speed"] * dt
+        c, s = np.cos(theta), np.sin(theta)
+        rel = self.position - ob["center"]
+        rel_rot = (rel * c + np.cross(axis, rel) * s
+                   + axis * np.dot(axis, rel) * (1.0 - c))
+        self.position = ob["center"] + rel_rot
+        # Keep looking at the center; preserve the orbit axis as up so
+        # the horizon stays level through the full revolution.
+        d = ob["center"] - self.position
+        n = np.linalg.norm(d)
+        if n > 0:
+            self._forward = (d / n).astype(np.float32)
+            self._up = axis.astype(np.float32)
+            self._dirty = True
 
     def on_scroll(self, offset):
         self.speed *= 1.15 ** (offset / 3.0)

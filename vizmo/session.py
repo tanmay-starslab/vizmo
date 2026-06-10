@@ -61,6 +61,18 @@ def apply_camera_pose(camera, pose):
     camera._dirty = True
 
 
+def fly_to_pose(camera, pose, duration=1.2):
+    """Eased version of apply_camera_pose (speed/fov switch instantly)."""
+    camera.fly_to(
+        position=pose["position"],
+        forward=pose["forward"],
+        up=pose["up"],
+        duration=duration,
+    )
+    camera.speed = float(pose.get("speed", camera.speed))
+    camera.fov = float(pose.get("fov", camera.fov))
+
+
 def _settings_file():
     return os.path.join(config_dir(), "config.json")
 

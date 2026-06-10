@@ -414,9 +414,46 @@ def run_wgpu_app(
                 status_bar.enabled = vis
                 gizmo.enabled = vis
                 toasts.show(f"Science chrome {'on' if vis else 'off'}")
+            elif key == glfw.KEY_N:
+                center = data.get_view_center()
+                if mods & glfw.MOD_SHIFT:
+                    # Approach: fly to 1/3 of the current distance.
+                    rel = camera.position - center
+                    d = np.linalg.norm(rel)
+                    if d > 0:
+                        camera.fly_to(position=center + rel / 3.0,
+                                      look_at=center, duration=1.4)
+                        toasts.show("Approaching view center")
+                else:
+                    camera.fly_to(look_at=center, duration=0.8)
+                    toasts.show("Looking at view center")
+            elif key == glfw.KEY_Y:
+                if camera.orbit is not None:
+                    camera.stop_orbit()
+                    toasts.show("Orbit off")
+                else:
+                    speed_scale = -1.0 if (mods & glfw.MOD_SHIFT) else 1.0
+                    if camera.start_orbit(data.get_view_center(),
+                                          angular_speed=0.25 * speed_scale):
+                        toasts.show("Orbiting view center (Y stops)", "ok")
+            elif key in (glfw.KEY_F2, glfw.KEY_F3, glfw.KEY_F4):
+                center = data.get_view_center()
+                d = float(np.linalg.norm(camera.position - center))
+                if d <= 0:
+                    d = camera.speed * 5.0
+                axis = {glfw.KEY_F2: np.array([1.0, 0, 0]),
+                        glfw.KEY_F3: np.array([0, 1.0, 0]),
+                        glfw.KEY_F4: np.array([0, 0, 1.0])}[key]
+                sign = -1.0 if (mods & glfw.MOD_SHIFT) else 1.0
+                up = (np.array([0, 0, 1.0]) if key != glfw.KEY_F4
+                      else np.array([0, 1.0, 0]))
+                camera.fly_to(position=center + sign * d * axis,
+                              look_at=center, up=up, duration=1.2)
+                toasts.show(f"View along {'-' if sign < 0 else '+'}"
+                            f"{'XYZ'[key - glfw.KEY_F2]}")
             elif glfw.KEY_1 <= key <= glfw.KEY_9:
                 slot = str(key - glfw.KEY_0)
-                from .session import camera_pose, apply_camera_pose, save_bookmarks
+                from .session import camera_pose, fly_to_pose, save_bookmarks
 
                 if mods & glfw.MOD_SHIFT:
                     _bookmarks[slot] = camera_pose(camera)
@@ -424,7 +461,7 @@ def run_wgpu_app(
                     print(f"Bookmark {slot} saved")
                     toasts.show(f"Bookmark {slot} saved", "ok")
                 elif slot in _bookmarks:
-                    apply_camera_pose(camera, _bookmarks[slot])
+                    fly_to_pose(camera, _bookmarks[slot])
                     print(f"Bookmark {slot} restored")
                     toasts.show(f"Bookmark {slot}")
                 else:
