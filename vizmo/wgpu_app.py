@@ -42,6 +42,7 @@ def run_wgpu_app(
     field=None,
     mode=None,
     filters=None,
+    series=False,
 ):
     """Run the vizmo application with the wgpu backend.
 
@@ -52,6 +53,19 @@ def run_wgpu_app(
     import os
 
     snapshot_path = os.path.abspath(snapshot_path)
+    # --series: the positional path is a directory; discover the time
+    # series and start from the first (highest-z) snapshot.
+    _series = {"snaps": [], "index": 0, "pending": None}
+    if series:
+        from .series import discover_snapshots
+
+        _series["snaps"] = discover_snapshots(snapshot_path)
+        if not _series["snaps"]:
+            raise FileNotFoundError(
+                f"--series: no snapshots found under {snapshot_path}")
+        snapshot_path = _series["snaps"][0].path
+        print(f"  Series: {len(_series['snaps'])} snapshots, starting "
+              f"z={_series['snaps'][0].redshift:.2f}")
     if screenshot_dir:
         os.makedirs(screenshot_dir, exist_ok=True)
 
@@ -603,6 +617,13 @@ def run_wgpu_app(
                         duration=5.0)
                 else:
                     toasts.show("Sightline mode off")
+            elif key in (glfw.KEY_LEFT, glfw.KEY_RIGHT) and _series["snaps"]:
+                step = -1 if key == glfw.KEY_LEFT else 1
+                new_i = _series["index"] + step
+                if 0 <= new_i < len(_series["snaps"]):
+                    _series["pending"] = new_i
+                else:
+                    toasts.show("End of series", "warn")
             elif key == glfw.KEY_F9:
                 vis = not scale_bar.enabled
                 scale_bar.enabled = vis
@@ -1653,6 +1674,61 @@ def run_wgpu_app(
                     drawer.open_inspector(idx)
                     toasts.show(f"Picked particle {idx:,}", "ok")
                 dirty = True
+
+        # Snapshot-series navigation: load the queued snapshot, keep
+        # the camera's offset from the (re-tracked) center.
+        if _series["pending"] is not None:
+            new_i = _series["pending"]
+            _series["pending"] = None
+            info = _series["snaps"][new_i]
+            toasts.show(
+                f"Loading snapshot {info.snap_num} (z={info.redshift:.2f})...",
+                "info")
+            try:
+                from .framing import find_center as _fc
+
+                old_center = data.get_view_center().copy()
+                cam_offset = camera.position - old_center
+                new_data = SnapshotData(
+                    info.path, particle_types=list(data.particle_types),
+                    hsml_progress=_hsml_progress)
+                data.close()
+                data = new_data
+                units = UnitSystem(data.header)
+                try:
+                    new_center = _fc(data, center_on or "densest")
+                except Exception:
+                    new_center = data.get_view_center()
+                data.set_view_center(new_center)
+                camera.fly_to(position=new_center + cam_offset,
+                              look_at=new_center, duration=0.4)
+                weights = data.get_field("Masses")
+                renderer.set_particles(data.positions, data.hsml, weights)
+                try:
+                    renderer.set_subsample_chunks(None)
+                except Exception:
+                    pass
+                if gpu_compute is not None:
+                    try:
+                        gpu_compute.release()
+                    except Exception:
+                        pass
+                gpu_compute = None
+                _slot_sorted[0] = None
+                _slot_sorted[1] = None
+                _series["index"] = new_i
+                _sd_fields = data.available_fields_with_derived()
+                _state["_vector_fields"] = data.available_vector_fields()
+                drawer.refresh()
+                needs_auto_range = True
+                dirty = True
+                toasts.show(
+                    f"Snapshot {new_i + 1}/{len(_series['snaps'])}  "
+                    f"z={info.redshift:.2f}  t={info.time_gyr:.2f} Gyr",
+                    "ok")
+            except Exception as e:
+                toasts.show(f"Snapshot load failed: {e}", "error",
+                            duration=6.0)
 
         # Particle-type reload requested from the UI tickboxes.
         pending_types = _state.get("_pending_ptype_reload")

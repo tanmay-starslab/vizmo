@@ -45,5 +45,6 @@ KEYBINDINGS = [
     ("\\", "Toggle developer HUD"),
     ("Tab", "Hide / show all UI"),
     ("F1 or H", "Toggle this help"),
+    ("Left / Right", "Previous / next snapshot (--series)"),
     ("Esc", "Quit"),
 ]

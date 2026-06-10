@@ -80,6 +80,12 @@ def main():
         "WeightedAverage is implied when --field is a non-mass field)",
     )
     parser.add_argument(
+        "--series",
+        action="store_true",
+        help="Treat the positional path as a directory of snapshots; "
+        "navigate the time series with Left/Right arrows",
+    )
+    parser.add_argument(
         "--filter",
         action="append",
         default=None,
@@ -132,6 +138,7 @@ def main():
                 field=args.field,
                 mode=args.mode,
                 filters=args.filter,
+                series=args.series,
             )
         finally:
             pr.disable()
@@ -159,6 +166,7 @@ def main():
             field=args.field,
             mode=args.mode,
             filters=args.filter,
+            series=args.series,
         )
 
 
