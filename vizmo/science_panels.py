@@ -578,11 +578,13 @@ class AnalysisDrawer(Panel):
             return f"{v:.2e}"
         return f"{v:.4g}"
 
-    def set_scope(self, center, radius_kpc, center_mode="densest"):
+    def set_scope(self, center, radius_kpc, center_mode="densest",
+                  region=None):
         self.scope = {
             "center": np.asarray(center, dtype=np.float64),
             "radius_kpc": float(radius_kpc),
             "center_mode": center_mode,
+            "region": region,
         }
         self.use_scope = True
         self.refresh()
@@ -596,6 +598,12 @@ class AnalysisDrawer(Panel):
         if self.scope is not None and self.use_scope:
             return self.scope["center"], self.scope["radius_kpc"]
         return None, None
+
+    def _active_region(self):
+        """SelectionRegion when an aperture shape is active, else None."""
+        if self.scope is not None and self.use_scope:
+            return self.scope.get("region")
+        return None
 
     # -- state management ---------------------------------------------------
 
@@ -655,7 +663,7 @@ class AnalysisDrawer(Panel):
             if key not in self._cache:
                 ph = analysis.phase_histogram(
                     data, xf, yf, center=sc_center, radius_kpc=sc_radius,
-                    weighting=wgt)
+                    weighting=wgt, region=self._active_region())
                 self._last_phase = ph
                 self._cache[key] = self._render_phase(ph, scale)
             return self._cache[key], f"{xf} vs {yf}"
@@ -677,7 +685,8 @@ class AnalysisDrawer(Panel):
                         r, tracks, unit, f, scale)
                 else:
                     r, prof, unit = analysis.radial_profile(
-                        data, f, center=sc_center, r_max_kpc=sc_radius)
+                        data, f, center=sc_center, r_max_kpc=sc_radius,
+                        region=self._active_region())
                     self._last_profile = (r, prof, f, unit)
                     self._cache[key] = self._render_profile(
                         r, prof, unit, f, scale)
@@ -932,7 +941,8 @@ class AnalysisDrawer(Panel):
             key = ("stats", r_use, data.n_particles, sck)
             if key not in self._cache:
                 self._cache[key] = analysis.region_stats(
-                    data, center=sc_center, radius_kpc=r_use)
+                    data, center=sc_center, radius_kpc=r_use,
+                    region=self._active_region())
             rows, used_r = self._cache[key]
             if sc_radius is None:
                 self._stats_radius_kpc = used_r

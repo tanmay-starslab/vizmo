@@ -258,7 +258,40 @@ def run_wgpu_app(
         "center": None,       # (3,) code units
         "radius": None,       # code units
         "center_mode": 0,     # index into analysis.CENTER_MODES
+        "shape_idx": 0,       # index into _APERTURE_SHAPES
     }
+    # Shape catalogue for the aperture tool (Tab cycles while placing).
+    # Each entry: (name, ring RGBA). Non-sphere shapes are oriented by
+    # the camera at submit time (axis = camera forward).
+    _APERTURE_SHAPES = [
+        ("sphere", (120, 200, 255, 255)),
+        ("cylinder", (240, 220, 90, 255)),
+        ("box", (235, 110, 235, 255)),
+        ("slab", (250, 160, 70, 255)),
+        ("cone", (110, 230, 130, 255)),
+        ("ellipsoid", (240, 240, 240, 255)),
+    ]
+
+    def _build_aperture_region():
+        """Materialize the current aperture as a SelectionRegion,
+        oriented by the camera for the axis-dependent shapes."""
+        from . import selection as selmod
+
+        name = _APERTURE_SHAPES[_aperture["shape_idx"]][0]
+        c = np.asarray(_aperture["center"], dtype=np.float64)
+        R = float(_aperture["radius"])
+        fwd = camera.forward.astype(np.float64)
+        if name == "cylinder":
+            return selmod.Cylinder(c, fwd, R, R)
+        if name == "box":
+            return selmod.Box(c - R, c + R)
+        if name == "slab":
+            return selmod.Slab(c, fwd, R / 2.0)
+        if name == "cone":
+            return selmod.Cone(c, fwd, 30.0, 2.0 * R)
+        if name == "ellipsoid":
+            return selmod.Ellipsoid(c, [R, 0.7 * R, 0.5 * R])
+        return selmod.Sphere(c, R)
 
     def _focus_center():
         """Center used by orbit / N / F2-F4: aperture when active."""
@@ -294,9 +327,12 @@ def run_wgpu_app(
         _aperture["placing"] = False
         _aperture["active"] = True
         r_kpc = _aperture["radius"] * units.length_to_kpc
-        drawer.set_scope(refined, r_kpc, mode_name)
+        region = _build_aperture_region()
+        shape_name = _APERTURE_SHAPES[_aperture["shape_idx"]][0]
+        drawer.set_scope(refined, r_kpc, mode_name, region=region)
         toasts.show(
-            f"Aperture set: R={r_kpc:.0f} kpc, center={mode_name}", "ok")
+            f"Aperture set: {shape_name}, R={r_kpc:.0f} kpc, "
+            f"center={mode_name}", "ok")
     _timings = {"cull": 0, "upload": 0, "render": 0}
     _last_message = ""
     _render_mode = RenderMode.surface_density("Masses")
@@ -490,7 +526,14 @@ def run_wgpu_app(
                 else:
                     sink_panel.enabled = not sink_panel.enabled
             elif key == glfw.KEY_TAB:
-                ui_hidden = not ui_hidden
+                if _aperture["placing"]:
+                    _aperture["shape_idx"] = (
+                        _aperture["shape_idx"] + 1) % len(_APERTURE_SHAPES)
+                    toasts.show(
+                        f"Aperture shape: "
+                        f"{_APERTURE_SHAPES[_aperture['shape_idx']][0]}")
+                else:
+                    ui_hidden = not ui_hidden
             elif key == glfw.KEY_B:
                 renderer.cycle_star_band(-1 if (mods & glfw.MOD_SHIFT) else 1)
             elif key == glfw.KEY_O:
@@ -1917,9 +1960,11 @@ def run_wgpu_app(
                         r_px = (_aperture["radius"] / (zf * tan_half)
                                 * fb_h / 2.0)
                         r_kpc = _aperture["radius"] * units.length_to_kpc
-                        lbl = f"R = {r_kpc:,.3g} kpc"
+                        shp, ring = _APERTURE_SHAPES[_aperture["shape_idx"]]
+                        lbl = f"{shp}  R = {r_kpc:,.3g} kpc"
                         if _aperture["placing"]:
-                            lbl += "  (M to set)"
+                            lbl += "  (M=set, Tab=shape)"
+                        aperture_panel.style.accent_color = ring
                         aperture_panel.update(cx_px, cy_px, r_px, lbl,
                                               placing=_aperture["placing"])
                         _aperture["visible"] = True

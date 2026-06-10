@@ -224,3 +224,70 @@ def test_stats_json_roundtrip(cosmo_data, tmp_path):
     payload = json.load(open(out))
     assert payload["region_stats"]["Particles"]
     assert "metadata" in payload
+
+
+# ---------------------------------------------------------------------------
+# Phase 1: region-aware analysis + new center modes
+# ---------------------------------------------------------------------------
+
+def test_fof_most_massive_center():
+    from vizmo.analysis import fof_most_massive_center
+
+    rng = np.random.default_rng(7)
+    # Dense cluster of 600 at (10,10,10), diffuse background of 400.
+    cluster = 10.0 + 0.1 * rng.standard_normal((600, 3))
+    bg = rng.uniform(0, 20, size=(400, 3))
+    pos = np.vstack([cluster, bg])
+    m = np.ones(len(pos))
+    c = fof_most_massive_center(pos, m)
+    assert np.linalg.norm(c - 10.0) < 0.5
+
+
+def test_stellar_com_center(tmp_path, cache_isolation):
+    from vizmo.data_manager import SnapshotData
+    from vizmo.analysis import stellar_com_center
+
+    path = str(tmp_path / "sg.hdf5")
+    rng = np.random.default_rng(8)
+    n_gas, n_star = 500, 300
+    with h5py.File(path, "w") as f:
+        h = f.create_group("Header")
+        h.attrs["BoxSize"] = 100.0
+        h.attrs["MassTable"] = np.zeros(6)
+        h.attrs["NumPart_ThisFile"] = np.array([n_gas, 0, 0, 0, n_star, 0])
+        h.attrs["Time"] = 1.0
+        h.attrs["HubbleParam"] = 0.7
+        g = f.create_group("PartType0")
+        g["Coordinates"] = 30.0 + rng.standard_normal((n_gas, 3))
+        g["Masses"] = np.full(n_gas, 1e-4, dtype=np.float32)
+        g["SmoothingLength"] = np.full(n_gas, 1.0, dtype=np.float32)
+        s4 = f.create_group("PartType4")
+        s4["Coordinates"] = 60.0 + 0.5 * rng.standard_normal((n_star, 3))
+        s4["Masses"] = np.full(n_star, 2e-4, dtype=np.float32)
+        s4["SubfindHsml"] = np.full(n_star, 1.0, dtype=np.float32)
+    d = SnapshotData(path, particle_types=[0, 4])
+    c = stellar_com_center(d, np.array([45.0, 45.0, 45.0]), 40.0)
+    # Stars live at 60; gas at 30 — stellar center must pick the stars.
+    assert np.linalg.norm(c - 60.0) < 1.0
+    d.close()
+
+
+def test_region_aware_analysis(cosmo_data):
+    from vizmo.selection import Box, Sphere
+    from vizmo.analysis import region_stats, phase_histogram
+
+    c = np.array([50.0, 50.0, 50.0])
+    box = Box(c - 5.0, c + 5.0)
+    sph = Sphere(c, 5.0)
+    rows_b, _ = region_stats(cosmo_data, center=c, radius_kpc=999.0,
+                             region=box)
+    rows_s, _ = region_stats(cosmo_data, center=c, radius_kpc=999.0,
+                             region=sph)
+    nb = int(dict(rows_b)["Particles"].replace(",", ""))
+    ns = int(dict(rows_s)["Particles"].replace(",", ""))
+    # The box circumscribes the sphere.
+    assert nb > ns > 0
+    ph = phase_histogram(cosmo_data, "NumberDensity", "Temperature",
+                         region=sph)
+    mass_s = float(dict(rows_s)["Total mass"].split()[0])
+    assert ph["H"].sum() == pytest.approx(mass_s, rel=2e-2)

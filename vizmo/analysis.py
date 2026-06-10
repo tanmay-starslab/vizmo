@@ -205,6 +205,10 @@ def find_center_in_region(data, center, radius_code, mode="densest"):
 
     if mode == "shrinking":
         return shrinking_sphere_center(pos, data.masses, center, radius_code)
+    if mode == "fof":
+        return fof_most_massive_center(pos[idx], data.masses[idx])
+    if mode == "stellar":
+        return stellar_com_center(data, center, radius_code)
     if mode == "com":
         m = data.masses[idx].astype(np.float64)
         return (pos[idx] * m[:, None]).sum(axis=0) / m.sum()
@@ -225,7 +229,73 @@ def find_center_in_region(data, center, radius_code, mode="densest"):
     return shrinking_sphere_center(pos, data.masses, center, radius_code)
 
 
-CENTER_MODES = ["densest", "potential", "shrinking", "com"]
+def fof_most_massive_center(positions, masses, linking_length=None):
+    """Centroid of the most massive friends-of-friends group.
+
+    Pure scipy implementation: cKDTree.query_pairs at the linking
+    length + union-find. Default linking length = 0.2 x mean
+    inter-particle separation. All inputs/outputs in code units.
+    """
+    from scipy.spatial import cKDTree
+
+    pos = np.asarray(positions, dtype=np.float64)
+    n = len(pos)
+    if n == 0:
+        raise ValueError("no particles for FoF")
+    if n > 200_000:  # FoF pair search is O(N b^3); subsample
+        rng = np.random.default_rng(0)
+        idx = rng.choice(n, size=200_000, replace=False)
+        pos = pos[idx]
+        masses = np.asarray(masses)[idx]
+        n = len(pos)
+    if linking_length is None:
+        span = pos.max(axis=0) - pos.min(axis=0)
+        vol = float(np.prod(np.maximum(span, 1e-12)))
+        linking_length = 0.2 * (vol / n) ** (1.0 / 3.0)
+    tree = cKDTree(pos)
+    pairs = tree.query_pairs(linking_length, output_type="ndarray")
+    parent = np.arange(n)
+
+    def find(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    for a, b in pairs:
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[rb] = ra
+    roots = np.fromiter((find(i) for i in range(n)), dtype=np.int64, count=n)
+    m = np.asarray(masses, dtype=np.float64)
+    gmass = np.bincount(roots, weights=m, minlength=n)
+    big = int(np.argmax(gmass))
+    sel = roots == big
+    return (pos[sel] * m[sel, None]).sum(axis=0) / m[sel].sum()
+
+
+def stellar_com_center(data, center, radius_code):
+    """Center of mass of star particles (PartType4) inside the sphere.
+    Falls back to the all-type CoM when no stars are loaded/present."""
+    sl = getattr(data, "_type_slices", {}).get(4)
+    pos_all = data.positions
+    m_all = data.masses.astype(np.float64)
+    center = np.asarray(center, dtype=np.float64)
+    if sl is not None:
+        pos = pos_all[sl]
+        m = m_all[sl]
+        d = np.linalg.norm(pos - center[None, :], axis=1)
+        keep = d <= radius_code
+        if keep.any():
+            return (pos[keep] * m[keep, None]).sum(axis=0) / m[keep].sum()
+    d = np.linalg.norm(pos_all - center[None, :], axis=1)
+    keep = d <= radius_code
+    if not keep.any():
+        return center
+    return (pos_all[keep] * m_all[keep, None]).sum(axis=0) / m_all[keep].sum()
+
+
+CENTER_MODES = ["densest", "potential", "shrinking", "com", "fof", "stellar"]
 
 
 # ---------------------------------------------------------------------------
@@ -251,7 +321,7 @@ TEMPERATURE_PHASES = [
 
 
 def radial_profile(data, field, center=None, r_min_kpc=None, r_max_kpc=None,
-                   n_bins=40, max_samples=4_000_000):
+                   n_bins=40, max_samples=4_000_000, region=None):
     """Mass-weighted radial profile of `field` about `center`.
 
     Special quantities (SPECIAL_PROFILES):
@@ -283,8 +353,11 @@ def radial_profile(data, field, center=None, r_min_kpc=None, r_max_kpc=None,
         sel = rng.choice(n, size=max_samples, replace=False)
         frac = n / max_samples
     else:
-        sel = slice(None)
+        sel = np.arange(n)
         frac = 1.0
+    if region is not None:
+        keep = region.contains(pos[sel])
+        sel = sel[keep] if isinstance(sel, np.ndarray) else np.flatnonzero(keep)
 
     r_code = np.linalg.norm(pos[sel] - center[None, :], axis=1)
     r_kpc = r_code * units.length_to_kpc
@@ -452,7 +525,8 @@ PHASE_WEIGHTINGS = ["mass", "volume", "SFR", "number"]
 
 
 def phase_histogram(data, xfield, yfield, n_bins=128, max_samples=4_000_000,
-                    center=None, radius_kpc=None, weighting="mass"):
+                    center=None, radius_kpc=None, weighting="mass",
+                    region=None):
     """Weighted 2D histogram of two fields.
 
     `weighting`: "mass" (Msun), "volume" (kpc^3, from m/rho), "SFR"
@@ -476,7 +550,11 @@ def phase_histogram(data, xfield, yfield, n_bins=128, max_samples=4_000_000,
         sel = np.arange(n)
         frac = 1.0
 
-    if center is not None and radius_kpc is not None:
+    if region is not None:
+        sel = sel[region.contains(data.positions[sel])]
+        if sel.size == 0:
+            return None
+    elif center is not None and radius_kpc is not None:
         r_code = radius_kpc / max(units.length_to_kpc, 1e-30)
         d = np.linalg.norm(
             data.positions[sel] - np.asarray(center, dtype=np.float64)[None, :],
@@ -548,7 +626,7 @@ def phase_histogram(data, xfield, yfield, n_bins=128, max_samples=4_000_000,
 # Region statistics
 # ---------------------------------------------------------------------------
 
-def region_stats(data, center=None, radius_kpc=None):
+def region_stats(data, center=None, radius_kpc=None, region=None):
     """Aggregate physical properties of a sphere around `center`.
 
     Returns a list of (label, value-string) rows ready for display.
@@ -564,7 +642,8 @@ def region_stats(data, center=None, radius_kpc=None):
     r_kpc = np.linalg.norm(pos - center[None, :], axis=1) * units.length_to_kpc
     if radius_kpc is None:
         radius_kpc = float(np.percentile(r_kpc, 50.0))
-    inside = r_kpc <= radius_kpc
+    inside = (region.contains(pos) if region is not None
+              else r_kpc <= radius_kpc)
     n_in = int(inside.sum())
 
     rows = [("Radius", f"{radius_kpc:,.1f} kpc"),
