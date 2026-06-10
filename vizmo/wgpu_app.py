@@ -343,6 +343,18 @@ def run_wgpu_app(
                 renderer.cycle_star_band(-1 if (mods & glfw.MOD_SHIFT) else 1)
             elif key == glfw.KEY_O:
                 renderer.toggle_star_extinction()
+            elif key == glfw.KEY_LEFT_BRACKET:
+                print(f"FOV: {camera.adjust_fov(-5.0):.0f}°")
+            elif key == glfw.KEY_RIGHT_BRACKET:
+                print(f"FOV: {camera.adjust_fov(+5.0):.0f}°")
+        # [ and ] repeat while held for a smooth zoom.
+        if action == glfw.REPEAT:
+            if key == glfw.KEY_LEFT_BRACKET:
+                camera.adjust_fov(-5.0)
+                dirty = True
+            elif key == glfw.KEY_RIGHT_BRACKET:
+                camera.adjust_fov(+5.0)
+                dirty = True
         camera.on_key(key, action)
 
     glfw.set_key_callback(window, key_callback)
@@ -520,7 +532,16 @@ def run_wgpu_app(
         if user_menu.on_scroll(yoffset):
             ui_dirty = True
             return
-        # Camera zoom: full re-render
+        # Ctrl+scroll: optical zoom (FOV). Plain scroll: flight speed.
+        ctrl_held = (
+            glfw.get_key(win, glfw.KEY_LEFT_CONTROL) == glfw.PRESS
+            or glfw.get_key(win, glfw.KEY_RIGHT_CONTROL) == glfw.PRESS
+        )
+        if ctrl_held:
+            dirty = True
+            camera.adjust_fov(-2.0 * yoffset)
+            return
+        # Camera speed change: full re-render
         dirty = True
         camera.on_scroll(yoffset)
 

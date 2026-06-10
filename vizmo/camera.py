@@ -170,6 +170,14 @@ class Camera:
     def on_scroll(self, offset):
         self.speed *= 1.15 ** (offset / 3.0)
 
+    def adjust_fov(self, delta_deg):
+        """Change field of view, clamped to a sane perspective range.
+
+        Lower FOV = telephoto zoom-in, higher = wide angle.
+        """
+        self.fov = float(np.clip(self.fov + delta_deg, 10.0, 140.0))
+        return self.fov
+
     def _yaw(self, angle):
         c, s = np.cos(angle), np.sin(angle)
         u = self.up
