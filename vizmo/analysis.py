@@ -156,15 +156,105 @@ def particle_summary(data, index):
 
 
 # ---------------------------------------------------------------------------
+# Region centering (aperture-aware)
+# ---------------------------------------------------------------------------
+
+def shrinking_sphere_center(positions, masses, center, radius,
+                            shrink_factor=0.9, min_particles=500):
+    """Power et al. (2003) / pynbody-style shrinking-sphere center.
+
+    Iteratively recomputes the center of mass inside a sphere whose
+    radius shrinks by `shrink_factor` per iteration, until fewer than
+    `min_particles` remain (or the radius collapses). Robust against
+    substructure that biases a plain center of mass.
+
+    All inputs in code units; returns (3,) float64 center.
+    """
+    center = np.asarray(center, dtype=np.float64).copy()
+    radius = float(radius)
+    pos = positions
+    m = np.asarray(masses, dtype=np.float64)
+    idx = np.arange(len(pos))
+    for _ in range(200):
+        d = np.linalg.norm(pos[idx] - center[None, :], axis=1)
+        keep = d <= radius
+        if keep.sum() < max(min_particles, 8):
+            break
+        idx = idx[keep]
+        mw = m[idx]
+        center = (pos[idx] * mw[:, None]).sum(axis=0) / mw.sum()
+        radius *= shrink_factor
+    return center
+
+
+def find_center_in_region(data, center, radius_code, mode="densest"):
+    """Refined center within a sphere (code units).
+
+    Modes: 'densest' (peak Density / SubfindDensity), 'potential'
+    (potential minimum), 'shrinking' (shrinking-sphere COM), 'com'
+    (plain center of mass). Falls back gracefully when the needed
+    field is missing. Returns (3,) float64 code-unit center.
+    """
+    center = np.asarray(center, dtype=np.float64)
+    pos = data.positions
+    d = np.linalg.norm(pos - center[None, :], axis=1)
+    inside = d <= float(radius_code)
+    if not inside.any():
+        return center
+    idx = np.flatnonzero(inside)
+
+    if mode == "shrinking":
+        return shrinking_sphere_center(pos, data.masses, center, radius_code)
+    if mode == "com":
+        m = data.masses[idx].astype(np.float64)
+        return (pos[idx] * m[:, None]).sum(axis=0) / m.sum()
+
+    field = None
+    avail = set(data.available_fields())
+    if mode == "potential" and "Potential" in avail:
+        vals = np.asarray(data.get_field("Potential"))[idx]
+        return pos[idx[int(np.argmin(vals))]].astype(np.float64)
+    for name in ("Density", "SubfindDensity", "SubfindDMDensity"):
+        if name in avail:
+            field = name
+            break
+    if field is not None:
+        vals = np.asarray(data.get_field(field))[idx]
+        return pos[idx[int(np.argmax(vals))]].astype(np.float64)
+    # Last resort: mass-weighted shrinking sphere.
+    return shrinking_sphere_center(pos, data.masses, center, radius_code)
+
+
+CENTER_MODES = ["densest", "potential", "shrinking", "com"]
+
+
+# ---------------------------------------------------------------------------
 # Radial profiles
 # ---------------------------------------------------------------------------
+
+# Gravitational constant in kpc (km/s)^2 / Msun
+G_KPC_KMS2_MSUN = 4.30091e-6
+
+# Profile quantities computed from geometry/kinematics rather than a
+# per-particle scalar field.
+SPECIAL_PROFILES = ("Density", "EnclosedMass", "RotationCurve",
+                    "VelocityDispersion3D")
+
 
 def radial_profile(data, field, center=None, r_min_kpc=None, r_max_kpc=None,
                    n_bins=40, max_samples=4_000_000):
     """Mass-weighted radial profile of `field` about `center`.
 
-    For field == "Density" the profile is the true shell density
-    (mass / shell volume) in Msun/kpc^3 rather than a weighted mean.
+    Special quantities (SPECIAL_PROFILES):
+      Density              — true shell density (Msun/kpc^3)
+      EnclosedMass         — M(<r) (Msun) over the loaded particle pool
+      RotationCurve        — v_c = sqrt(G M(<r)/r) (km/s); note this
+                             uses only the loaded particle types
+      VelocityDispersion3D — mass-weighted 3D velocity dispersion about
+                             the mean shell velocity (km/s)
+
+    `r_max_kpc` doubles as the aperture clamp: when given, only
+    particles inside it contribute.
 
     Returns:
         (r_kpc, prof, unit_label) — bin centers (geometric), profile
@@ -205,6 +295,40 @@ def radial_profile(data, field, center=None, r_min_kpc=None, r_max_kpc=None,
         vol = 4.0 / 3.0 * np.pi * np.diff(edges**3)
         prof = msum / vol
         unit = "Msun/kpc^3"
+    elif field in ("EnclosedMass", "RotationCurve"):
+        # Include mass interior to the first bin edge as well.
+        m_inner = mass[r_kpc < edges[0]].sum()
+        enc = m_inner + np.cumsum(msum)
+        if field == "EnclosedMass":
+            prof = enc
+            unit = "Msun"
+        else:
+            with np.errstate(invalid="ignore", divide="ignore"):
+                prof = np.sqrt(G_KPC_KMS2_MSUN * enc / edges[1:])
+            unit = "km/s"
+            # v_c is evaluated at the outer bin edge.
+            centers = edges[1:]
+        return centers, prof, unit
+    elif field == "VelocityDispersion3D":
+        vel = (np.asarray(data.get_vector_field("Velocities"),
+                          dtype=np.float64)[sel] * units.velocity_to_kms)
+        wsum = msum
+        vmean = np.empty((n_bins, 3))
+        for k in range(3):
+            s = np.bincount(which[ok], weights=(mass * vel[:, k])[ok],
+                            minlength=n_bins)
+            with np.errstate(invalid="ignore", divide="ignore"):
+                vmean[:, k] = s / wsum
+        dv2 = np.zeros(len(r_kpc))
+        vm = np.where(np.isfinite(vmean), vmean, 0.0)
+        for k in range(3):
+            dv2 += (vel[:, k] - vm[np.clip(which, 0, n_bins - 1), k]) ** 2
+        s2 = np.bincount(which[ok], weights=(mass * dv2)[ok], minlength=n_bins)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            prof = np.sqrt(s2 / wsum)
+        unit = "km/s"
+        prof[wsum == 0] = np.nan
+        return centers, prof, unit
     else:
         vals = np.asarray(data.get_field(field), dtype=np.float64)[sel]
         wsum = np.bincount(which[ok], weights=(mass * vals)[ok], minlength=n_bins)
@@ -233,11 +357,14 @@ def available_phase_presets(data):
     return [(x, y) for x, y in PHASE_PRESETS if x in fields and y in fields]
 
 
-def phase_histogram(data, xfield, yfield, n_bins=128, max_samples=4_000_000):
+def phase_histogram(data, xfield, yfield, n_bins=128, max_samples=4_000_000,
+                    center=None, radius_kpc=None):
     """Mass-weighted 2D histogram of two fields.
 
     Log-scales an axis automatically when its values are all-positive
-    and span more than 2.5 decades.
+    and span more than 2.5 decades. When `center` (code units) and
+    `radius_kpc` are given, only particles inside that sphere
+    contribute (aperture scope).
 
     Returns dict with H (n_bins x n_bins, mass in Msun), x/y edges,
     xlog/ylog flags, and axis labels.
@@ -251,8 +378,17 @@ def phase_histogram(data, xfield, yfield, n_bins=128, max_samples=4_000_000):
         sel = rng.choice(n, size=max_samples, replace=False)
         frac = n / max_samples
     else:
-        sel = slice(None)
+        sel = np.arange(n)
         frac = 1.0
+
+    if center is not None and radius_kpc is not None:
+        r_code = radius_kpc / max(units.length_to_kpc, 1e-30)
+        d = np.linalg.norm(
+            data.positions[sel] - np.asarray(center, dtype=np.float64)[None, :],
+            axis=1)
+        sel = sel[d <= r_code]
+        if sel.size == 0:
+            return None
 
     x = np.asarray(data.get_field(xfield), dtype=np.float64)[sel]
     y = np.asarray(data.get_field(yfield), dtype=np.float64)[sel]
