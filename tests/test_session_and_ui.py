@@ -52,7 +52,10 @@ def test_toolbar_hit_testing():
     tb.set_framebuffer_size(1920, 1080)
     tb.update(recording=False)
     keys = [w[3] for w in tb._widgets if w[2] == "hbutton"]
-    assert keys == ["auto_range", "screenshot", "record", "help"]
+    assert keys == [
+        "auto_range", "screenshot", "publication", "record", "help",
+        "inspector", "phase", "profile", "stats", "orbit", "export_region",
+    ]
     # Click dead-center of each button and check the action comes back.
     for w in tb._widgets:
         x = tb._panel_x + (w[4] + w[5]) // 2
