@@ -925,6 +925,53 @@ def _hsml_field_names():
     return ("SmoothingLength", "KernelMaxRadius", "Hsml", "StellarHsml", "SubfindHsml")
 
 
+def _hsml_disk_cache_path(snapshot_path, p, n):
+    """Cache file for computed kernel radii, keyed by snapshot identity.
+
+    Keyed on absolute path + file size + mtime + ptype + particle count,
+    so a re-written snapshot never reuses stale radii. Lives under
+    ~/.cache/vizmo (not next to the data — snapshot dirs are often
+    read-only or synced).
+    """
+    import hashlib
+
+    ap = os.path.abspath(snapshot_path)
+    try:
+        st = os.stat(ap)
+        sig = f"{ap}|{st.st_size}|{int(st.st_mtime)}|{p}|{n}"
+    except OSError:
+        sig = f"{ap}|{p}|{n}"
+    digest = hashlib.sha1(sig.encode()).hexdigest()[:20]
+    cache_dir = os.path.join(
+        os.environ.get("XDG_CACHE_HOME", os.path.expanduser("~/.cache")), "vizmo", "hsml"
+    )
+    return os.path.join(cache_dir, f"{digest}.npy")
+
+
+def _hsml_disk_cache_load(snapshot_path, p, n):
+    path = _hsml_disk_cache_path(snapshot_path, p, n)
+    try:
+        if os.path.isfile(path):
+            h = np.load(path)
+            if len(h) == n:
+                print(f"  Loaded cached kernel radii for PartType{p} ({n:,} particles)")
+                return h.astype(np.float32, copy=False)
+    except Exception as e:
+        print(f"  hsml cache read failed ({e}); recomputing")
+    return None
+
+
+def _hsml_disk_cache_save(snapshot_path, p, n, h):
+    path = _hsml_disk_cache_path(snapshot_path, p, n)
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = path + ".tmp.npy"  # ends in .npy so np.save doesn't rename it
+        np.save(tmp, h)
+        os.replace(tmp, path)
+    except Exception as e:
+        print(f"  hsml cache write failed ({e}); continuing without")
+
+
 def _compute_hsml_kdtree(positions, boxsize=None, n_neighbors=50,
                          des_ngb=32, chunk_size=10_000_000):
     """Compute SPH-style smoothing lengths via KDTree + meshoid.HsmlIter.
@@ -1416,7 +1463,13 @@ class SnapshotData:
                 self._hsml_cache[p] = h
                 return h
 
-        # Last resort: KDTree + meshoid.HsmlIter, computed in parallel chunks.
+        # Last resort: KDTree + meshoid.HsmlIter, computed in parallel
+        # chunks. Expensive (tens of seconds for 10M+ particles), so the
+        # result is persisted to a disk cache keyed on snapshot identity.
+        h = _hsml_disk_cache_load(self.path, p, len(pos))
+        if h is not None:
+            self._hsml_cache[p] = h
+            return h
         msg = f"Computing kernel radii for PartType{p}..."
         print(f"  {msg}  ({len(pos):,} particles)")
         if self._hsml_progress is not None:
@@ -1427,6 +1480,7 @@ class SnapshotData:
         boxsize = self.header.get("BoxSize", None)
         h = _compute_hsml_kdtree(pos, boxsize)
         self._hsml_cache[p] = h
+        _hsml_disk_cache_save(self.path, p, len(pos), h)
         return h
 
     def _masses_from_masstable(self, ptype, grp):
