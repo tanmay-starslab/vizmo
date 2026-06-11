@@ -13,6 +13,7 @@ import numpy as np
 from PIL import Image, ImageDraw
 
 from .overlay import Panel, PanelStyle, _rounded
+from .themes import DarkTheme
 
 # ---------------------------------------------------------------------------
 # Styles
@@ -20,45 +21,43 @@ from .overlay import Panel, PanelStyle, _rounded
 
 SCALEBAR_STYLE = PanelStyle(
     font_size=20, line_height=28, margin=8, min_width=10,
-    bg_color=(0, 0, 0, 0),
-    text_color=(235, 238, 245, 255),
-    accent_color=(255, 255, 255, 255),
-    toggle_on_color=(100, 180, 255, 255),
-    toggle_off_color=(110, 115, 130, 255),
-    dropdown_bg=(34, 37, 50, 255),
-    dropdown_hover=(80, 100, 140, 255),
-    slider_btn=(64, 70, 88, 255),
+    bg_color=DarkTheme.TRANSPARENT,
+    text_color=DarkTheme.C_235_238_245_255,
+    accent_color=DarkTheme.C_255_255_255_255,
+    toggle_on_color=DarkTheme.C_100_180_255_255,
+    toggle_off_color=DarkTheme.C_110_115_130_255,
+    dropdown_bg=DarkTheme.C_34_37_50_255,
+    dropdown_hover=DarkTheme.C_80_100_140_255,
+    slider_btn=DarkTheme.C_64_70_88_255,
     position="bottom-center",
     font_family="sans-serif",
 )
 
 STATUS_STYLE = PanelStyle(
     font_size=16, line_height=24, margin=8, min_width=10,
-    bg_color=(10, 12, 20, 165),
-    text_color=(200, 206, 218, 255),
-    accent_color=(100, 180, 255, 255),
-    toggle_on_color=(100, 180, 255, 255),
-    toggle_off_color=(110, 115, 130, 255),
-    dropdown_bg=(34, 37, 50, 255),
-    dropdown_hover=(80, 100, 140, 255),
-    slider_btn=(64, 70, 88, 255),
+    bg_color=DarkTheme.C_10_12_20_165,
+    text_color=DarkTheme.C_200_206_218_255,
+    accent_color=DarkTheme.C_100_180_255_255,
+    toggle_on_color=DarkTheme.C_100_180_255_255,
+    toggle_off_color=DarkTheme.C_110_115_130_255,
+    dropdown_bg=DarkTheme.C_34_37_50_255,
+    dropdown_hover=DarkTheme.C_80_100_140_255,
+    slider_btn=DarkTheme.C_64_70_88_255,
     position="bottom-right",
     font_family="sans-serif",
     radius=10,
 )
 
-from .themes import DarkTheme as _DT
-
 TOAST_STYLE = PanelStyle(
     font_size=20, line_height=30, margin=10, min_width=10,
-    bg_color=_DT.BG_SURFACE,
-    text_color=_DT.TEXT_PRIMARY,
-    accent_color=_DT.SUCCESS,
-    toggle_on_color=_DT.SUCCESS,
-    toggle_off_color=_DT.DANGER,
-    dropdown_bg=_DT.BG_RAISED,
-    dropdown_hover=_DT.ACCENT_DIM,
-    slider_btn=_DT.BG_RAISED,
+    bg_color=DarkTheme.BG_SURFACE,
+    text_color=DarkTheme.TEXT_PRIMARY,
+    accent_color=DarkTheme.SUCCESS,
+    toggle_on_color=DarkTheme.SUCCESS,
+    toggle_off_color=DarkTheme.DANGER,
+    dropdown_bg=DarkTheme.BG_RAISED,
+    dropdown_hover=DarkTheme.ACCENT_DIM,
+    slider_btn=DarkTheme.BG_RAISED,
     position="bottom-right",
     font_family="sans-serif",
     radius=12,
@@ -66,14 +65,14 @@ TOAST_STYLE = PanelStyle(
 
 GIZMO_STYLE = PanelStyle(
     font_size=15, line_height=20, margin=6, min_width=10,
-    bg_color=(10, 12, 20, 130),
-    text_color=(220, 224, 232, 255),
-    accent_color=(255, 255, 255, 255),
-    toggle_on_color=(100, 180, 255, 255),
-    toggle_off_color=(110, 115, 130, 255),
-    dropdown_bg=(34, 37, 50, 255),
-    dropdown_hover=(80, 100, 140, 255),
-    slider_btn=(64, 70, 88, 255),
+    bg_color=DarkTheme.C_10_12_20_130,
+    text_color=DarkTheme.C_220_224_232_255,
+    accent_color=DarkTheme.C_255_255_255_255,
+    toggle_on_color=DarkTheme.C_100_180_255_255,
+    toggle_off_color=DarkTheme.C_110_115_130_255,
+    dropdown_bg=DarkTheme.C_34_37_50_255,
+    dropdown_hover=DarkTheme.C_80_100_140_255,
+    slider_btn=DarkTheme.C_64_70_88_255,
     position="bottom-right",
     font_family="sans-serif",
     radius=10,
@@ -81,14 +80,14 @@ GIZMO_STYLE = PanelStyle(
 
 DRAWER_STYLE = PanelStyle(
     font_size=20, line_height=30, margin=12, min_width=360,
-    bg_color=(19, 24, 31, 235),          # DarkTheme.BG_SURFACE @ panel alpha
-    text_color=(232, 237, 243, 255),     # DarkTheme.TEXT_PRIMARY
-    accent_color=(61, 126, 255, 255),    # DarkTheme.ACCENT
-    toggle_on_color=(100, 180, 255, 255),
-    toggle_off_color=(110, 115, 130, 255),
-    dropdown_bg=(34, 37, 50, 255),
-    dropdown_hover=(80, 100, 140, 255),
-    slider_btn=(64, 70, 88, 255),
+    bg_color=DarkTheme.BG_SURFACE,          # DarkTheme.BG_SURFACE @ panel alpha
+    text_color=DarkTheme.TEXT_PRIMARY,     # DarkTheme.TEXT_PRIMARY
+    accent_color=DarkTheme.ACCENT,    # DarkTheme.ACCENT
+    toggle_on_color=DarkTheme.C_100_180_255_255,
+    toggle_off_color=DarkTheme.C_110_115_130_255,
+    dropdown_bg=DarkTheme.C_34_37_50_255,
+    dropdown_hover=DarkTheme.C_80_100_140_255,
+    slider_btn=DarkTheme.C_64_70_88_255,
     position="center-right",
     font_family="sans-serif",
     radius=14,
@@ -141,10 +140,10 @@ class ScaleBar(Panel):
         LH = s.line_height
         th = LH + 14
         tw = bar_px + 4
-        img = Image.new("RGBA", (tw, th), (0, 0, 0, 0))
+        img = Image.new("RGBA", (tw, th), DarkTheme.TRANSPARENT)
         draw = ImageDraw.Draw(img)
         ybar = th - 6
-        shadow = (0, 0, 0, 180)
+        shadow = DarkTheme.C_0_0_0_180
         for dx, dy in ((1, 1),):
             draw.line([(2 + dx, ybar + dy), (tw - 2 + dx, ybar + dy)],
                       fill=shadow, width=3)
@@ -212,10 +211,10 @@ class StatusBar(Panel):
         bbox = dummy.textbbox((0, 0), text, font=self._font)
         tw = bbox[2] - bbox[0] + M * 3
         th = s.line_height + M
-        img = Image.new("RGBA", (tw, th), (0, 0, 0, 0))
+        img = Image.new("RGBA", (tw, th), DarkTheme.TRANSPARENT)
         draw = ImageDraw.Draw(img)
         _rounded(draw, [(0, 0), (tw - 1, th - 1)], s.radius, fill=s.bg_color,
-                 outline=(255, 255, 255, 26))
+                 outline=DarkTheme.C_255_255_255_26)
         draw.text((M + 4, M // 2 + 1), text, fill=s.text_color, font=self._font)
 
         self._panel_w, self._panel_h = tw, th
@@ -286,12 +285,12 @@ class ToastOverlay(Panel):
         row_h = LH + 8
         th = row_h * len(self._toasts) + 4
 
-        img = Image.new("RGBA", (tw, th), (0, 0, 0, 0))
+        img = Image.new("RGBA", (tw, th), DarkTheme.TRANSPARENT)
         draw = ImageDraw.Draw(img)
         kind_col = {
             "info": s.text_color,
             "ok": s.toggle_on_color,
-            "warn": (255, 200, 110, 255),
+            "warn": DarkTheme.C_255_200_110_255,
             "error": s.toggle_off_color,
         }
         y = 0
@@ -353,11 +352,11 @@ class AxesGizmo(Panel):
         tw = th = size
         cx = cy = size // 2
         L = size * 0.36
-        img = Image.new("RGBA", (tw, th), (0, 0, 0, 0))
+        img = Image.new("RGBA", (tw, th), DarkTheme.TRANSPARENT)
         draw = ImageDraw.Draw(img)
         s = self.style
         _rounded(draw, [(0, 0), (tw - 1, th - 1)], s.radius, fill=s.bg_color,
-                 outline=(255, 255, 255, 22))
+                 outline=DarkTheme.C_255_255_255_22)
 
         axes = [
             ("X", np.array([1.0, 0, 0]), (235, 110, 110)),
@@ -378,7 +377,7 @@ class AxesGizmo(Panel):
             lx = cx + px * 1.28 - 4
             ly = cy + py * 1.28 - self.style.font_size // 2
             draw.text((lx, ly), label, fill=c, font=self._font)
-        draw.ellipse([cx - 2, cy - 2, cx + 2, cy + 2], fill=(230, 230, 235, 255))
+        draw.ellipse([cx - 2, cy - 2, cx + 2, cy + 2], fill=DarkTheme.C_230_230_235_255)
 
         self._panel_w, self._panel_h = tw, th
         self._panel_x, self._panel_y = self._panel_origin(tw, th)
@@ -396,14 +395,14 @@ class AxesGizmo(Panel):
 
 APERTURE_STYLE = PanelStyle(
     font_size=18, line_height=26, margin=8, min_width=10,
-    bg_color=(0, 0, 0, 0),
-    text_color=(235, 238, 245, 255),
-    accent_color=(120, 200, 255, 255),
-    toggle_on_color=(120, 200, 255, 255),
-    toggle_off_color=(110, 115, 130, 255),
-    dropdown_bg=(34, 37, 50, 255),
-    dropdown_hover=(80, 100, 140, 255),
-    slider_btn=(64, 70, 88, 255),
+    bg_color=DarkTheme.TRANSPARENT,
+    text_color=DarkTheme.C_235_238_245_255,
+    accent_color=DarkTheme.C_120_200_255_255,
+    toggle_on_color=DarkTheme.C_120_200_255_255,
+    toggle_off_color=DarkTheme.C_110_115_130_255,
+    dropdown_bg=DarkTheme.C_34_37_50_255,
+    dropdown_hover=DarkTheme.C_80_100_140_255,
+    slider_btn=DarkTheme.C_64_70_88_255,
     position="top-left",
     font_family="sans-serif",
 )
@@ -444,10 +443,10 @@ class ApertureOverlay(Panel):
         size = int(2 * r) + 2 * pad
         tw = th = min(size, self.MAX_TEX)
         c = tw // 2
-        img = Image.new("RGBA", (tw, th), (0, 0, 0, 0))
+        img = Image.new("RGBA", (tw, th), DarkTheme.TRANSPARENT)
         draw = ImageDraw.Draw(img)
-        col = self.style.accent_color if not placing else (255, 200, 110, 255)
-        shadow = (0, 0, 0, 150)
+        col = self.style.accent_color if not placing else DarkTheme.C_255_200_110_255
+        shadow = DarkTheme.C_0_0_0_150
 
         if placing:
             # Dashed ring: 48 arc segments, alternating.
@@ -539,10 +538,10 @@ class ProfilerOverlay(Panel):
         rows = sorted(pass_times.items(), key=lambda kv: -kv[1])
         tw = self.BAR_W + 150
         th = LH * (len(rows) + 2) + M * 2
-        img = Image.new("RGBA", (tw, th), (0, 0, 0, 0))
+        img = Image.new("RGBA", (tw, th), DarkTheme.TRANSPARENT)
         draw = ImageDraw.Draw(img)
         _rounded(draw, [(0, 0), (tw - 1, th - 1)], s.radius,
-                 fill=s.bg_color, outline=(255, 255, 255, 26))
+                 fill=s.bg_color, outline=DarkTheme.C_255_255_255_26)
         src_lbl = "GPU timestamps" if gpu_timed else "CPU-timed"
         draw.text((M, M), f"frame {total_ms:.1f} ms  ({src_lbl})",
                   fill=s.accent_color, font=self._font)
@@ -553,7 +552,7 @@ class ProfilerOverlay(Panel):
             bx0 = M + 80
             bw = int(self.BAR_W * v / vmax)
             _rounded(draw, [(bx0, y + 4), (bx0 + max(bw, 2), y + LH - 6)],
-                     4, fill=(61, 126, 255, 220))
+                     4, fill=DarkTheme.C_61_126_255_220)
             txt = f"{v:.2f} ms"
             bb = draw.textbbox((0, 0), txt, font=self._font)
             draw.text((tw - M - (bb[2] - bb[0]), y), txt,
@@ -597,17 +596,17 @@ class SightlinesOverlay(Panel):
             return
         self._last_key = key
         tw, th = max(self._fb_width, 4), max(self._fb_height, 4)
-        img = Image.new("RGBA", (tw, th), (0, 0, 0, 0))
+        img = Image.new("RGBA", (tw, th), DarkTheme.TRANSPARENT)
         draw = ImageDraw.Draw(img)
         for x0, y0, x1, y1, lbl, color in segments:
             draw.line([(x0 + 1, y0 + 1), (x1 + 1, y1 + 1)],
-                      fill=(0, 0, 0, 150), width=4)
+                      fill=DarkTheme.C_0_0_0_150, width=4)
             draw.line([(x0, y0), (x1, y1)], fill=color, width=2)
             for x, y in ((x0, y0), (x1, y1)):
                 draw.ellipse([x - 4, y - 4, x + 4, y + 4],
                              outline=color, width=2)
             mx, my = (x0 + x1) / 2, (y0 + y1) / 2
-            draw.text((mx + 7, my + 1), lbl, fill=(0, 0, 0, 150),
+            draw.text((mx + 7, my + 1), lbl, fill=DarkTheme.C_0_0_0_150,
                       font=self._font)
             draw.text((mx + 6, my), lbl, fill=color, font=self._font)
         self._pos_px = (0, 0)
@@ -1025,28 +1024,28 @@ class AnalysisDrawer(Panel):
         if not filters:
             th += LH
 
-        img = Image.new("RGBA", (tw, th), (0, 0, 0, 0))
+        img = Image.new("RGBA", (tw, th), DarkTheme.TRANSPARENT)
         draw = ImageDraw.Draw(img)
         _rounded(draw, [(0, 0), (tw - 1, th - 1)], s.radius, fill=s.bg_color,
-                 outline=(255, 255, 255, 30))
+                 outline=DarkTheme.C_255_255_255_30)
         draw.text((M, 6), "Field filters", fill=s.accent_color, font=self._font)
         cw = LH - 6
         cx0, cy0 = tw - M - cw, 5
         _rounded(draw, [(cx0, cy0), (cx0 + cw, cy0 + cw)], 6,
-                 fill=(60, 34, 40, 255), outline=(255, 255, 255, 40))
+                 fill=DarkTheme.C_60_34_40_255, outline=DarkTheme.C_255_255_255_40)
         draw.line([(cx0 + 6, cy0 + 6), (cx0 + cw - 6, cy0 + cw - 6)],
-                  fill=(235, 160, 160, 255), width=2)
+                  fill=DarkTheme.C_235_160_160_255, width=2)
         draw.line([(cx0 + cw - 6, cy0 + 6), (cx0 + 6, cy0 + cw - 6)],
-                  fill=(235, 160, 160, 255), width=2)
+                  fill=DarkTheme.C_235_160_160_255, width=2)
         self._buttons.append((cx0, cy0, cx0 + cw, cy0 + cw, "close"))
         draw.line([(M, header_h - 2), (tw - M, header_h - 2)],
-                  fill=(255, 255, 255, 30), width=1)
+                  fill=DarkTheme.C_255_255_255_30, width=1)
 
         def btn(x, y, label, action, w=None, fill=None):
             bb = dummy.textbbox((0, 0), label, font=self._font)
             bw = w if w is not None else bb[2] - bb[0] + 18
             _rounded(draw, [(x, y), (x + bw, y + LH - 4)], 7,
-                     fill=fill or s.slider_btn, outline=(255, 255, 255, 45))
+                     fill=fill or s.slider_btn, outline=DarkTheme.C_255_255_255_45)
             draw.text((x + (bw - bb[2] + bb[0]) // 2, y - 2), label,
                       fill=s.text_color, font=self._font)
             self._buttons.append((x, y, x + bw, y + LH - 4, action))
@@ -1054,20 +1053,20 @@ class AnalysisDrawer(Panel):
 
         y = header_h + 6
         if not filters:
-            draw.text((M, y), "No filters active", fill=(168, 174, 188, 255),
+            draw.text((M, y), "No filters active", fill=DarkTheme.C_168_174_188_255,
                       font=self._font)
             y += LH
         for i, f in enumerate(filters):
             draw.text((M, y), f["field"], fill=s.text_color, font=self._font)
             bx = tw - M - (LH - 4)
             btn(bx, y + 2, "x", ("f_del", i), w=LH - 4,
-                fill=(60, 34, 40, 255))
+                fill=DarkTheme.C_60_34_40_255)
             y += LH
             bx = M
             bx += btn(bx, y + 2, "-", ("f_lo", i, -5), w=LH) + 4
             bx += btn(bx, y + 2, "+", ("f_lo", i, +5), w=LH) + 10
             rng_txt = f"{self._fmt_val(f['lo'])} .. {self._fmt_val(f['hi'])}"
-            draw.text((bx, y), rng_txt, fill=(168, 174, 188, 255),
+            draw.text((bx, y), rng_txt, fill=DarkTheme.C_168_174_188_255,
                       font=self._font)
             bb = dummy.textbbox((0, 0), rng_txt, font=self._font)
             bx += bb[2] - bb[0] + 10
@@ -1082,7 +1081,7 @@ class AnalysisDrawer(Panel):
         draw.text((bx + 4, y), cand, fill=s.text_color, font=self._font)
         bx += cand_w
         bx += btn(bx, y + 2, ">", ("f_field", +1), w=LH + 6) + 10
-        btn(bx, y + 2, "Add", ("f_add", cand), fill=(40, 62, 90, 255))
+        btn(bx, y + 2, "Add", ("f_add", cand), fill=DarkTheme.C_40_62_90_255)
 
         self._panel_w, self._panel_h = tw, th
         self._panel_x, self._panel_y = self._panel_origin(tw, th)
@@ -1282,38 +1281,38 @@ class AnalysisDrawer(Panel):
         scope_h = LH + 4 if self.scope is not None else 0
         th = header_h + body_h + footer_h + extra_h + scope_h + M
 
-        img = Image.new("RGBA", (tw, th), (0, 0, 0, 0))
+        img = Image.new("RGBA", (tw, th), DarkTheme.TRANSPARENT)
         draw = ImageDraw.Draw(img)
         _rounded(draw, [(0, 0), (tw - 1, th - 1)], s.radius, fill=s.bg_color,
-                 outline=(255, 255, 255, 30))
+                 outline=DarkTheme.C_255_255_255_30)
 
         # Header: title + close box
         draw.text((M, 6), title, fill=s.accent_color, font=self._font)
         cw = LH - 6
         cx0, cy0 = tw - M - cw, 5
         _rounded(draw, [(cx0, cy0), (cx0 + cw, cy0 + cw)], 6,
-                 fill=(60, 34, 40, 255), outline=(255, 255, 255, 40))
+                 fill=DarkTheme.C_60_34_40_255, outline=DarkTheme.C_255_255_255_40)
         draw.line([(cx0 + 6, cy0 + 6), (cx0 + cw - 6, cy0 + cw - 6)],
-                  fill=(235, 160, 160, 255), width=2)
+                  fill=DarkTheme.C_235_160_160_255, width=2)
         draw.line([(cx0 + cw - 6, cy0 + 6), (cx0 + 6, cy0 + cw - 6)],
-                  fill=(235, 160, 160, 255), width=2)
+                  fill=DarkTheme.C_235_160_160_255, width=2)
         self._buttons.append((cx0, cy0, cx0 + cw, cy0 + cw, "close"))
         draw.line([(M, header_h - 2), (tw - M, header_h - 2)],
-                  fill=(255, 255, 255, 30), width=1)
+                  fill=DarkTheme.C_255_255_255_30, width=1)
 
         y = header_h + 4
         if plot_img is not None:
             img.alpha_composite(plot_img, ((tw - plot_img.width) // 2, y))
             y += plot_img.height + 4
             for a, b in rows:
-                draw.text((M, y + 2), str(a), fill=(168, 174, 188, 255),
+                draw.text((M, y + 2), str(a), fill=DarkTheme.C_168_174_188_255,
                           font=self._font)
                 draw.text((M + kv_w + 28, y + 2), str(b), fill=s.text_color,
                           font=self._font)
                 y += LH
         else:
             for a, b in rows:
-                draw.text((M, y + 2), str(a), fill=(168, 174, 188, 255),
+                draw.text((M, y + 2), str(a), fill=DarkTheme.C_168_174_188_255,
                           font=self._font)
                 draw.text((M + kv_w + 28, y + 2), str(b), fill=s.text_color,
                           font=self._font)
@@ -1328,7 +1327,7 @@ class AnalysisDrawer(Panel):
             bw = bbox[2] - bbox[0] + 24
             bx0 = M
             _rounded(draw, [(bx0, y), (bx0 + bw, y + LH - 2)], 8,
-                     fill=(40, 62, 90, 255), outline=(255, 255, 255, 45))
+                     fill=DarkTheme.C_40_62_90_255, outline=DarkTheme.C_255_255_255_45)
             draw.text((bx0 + 12, y + 1), label, fill=s.text_color,
                       font=self._font)
             self._buttons.append((bx0, y, bx0 + bw, y + LH - 2, "center_on_pick"))
@@ -1340,9 +1339,9 @@ class AnalysisDrawer(Panel):
             lbl = "Aperture" if self.use_scope else "Global"
             bb = dummy.textbbox((0, 0), lbl, font=self._font)
             bw = bb[2] - bb[0] + 20
-            fill = (40, 62, 90, 255) if self.use_scope else s.slider_btn
+            fill = DarkTheme.C_40_62_90_255 if self.use_scope else s.slider_btn
             _rounded(draw, [(bx, y + 2), (bx + bw, y + LH - 2)], 8,
-                     fill=fill, outline=(255, 255, 255, 45))
+                     fill=fill, outline=DarkTheme.C_255_255_255_45)
             draw.text((bx + 10, y), lbl, fill=s.text_color, font=self._font)
             self._buttons.append((bx, y + 2, bx + bw, y + LH - 2, "toggle_scope"))
             bx += bw + 8
@@ -1351,23 +1350,23 @@ class AnalysisDrawer(Panel):
                 bb = dummy.textbbox((0, 0), lbl2, font=self._font)
                 bw2 = bb[2] - bb[0] + 20
                 _rounded(draw, [(bx, y + 2), (bx + bw2, y + LH - 2)], 8,
-                         fill=s.slider_btn, outline=(255, 255, 255, 45))
+                         fill=s.slider_btn, outline=DarkTheme.C_255_255_255_45)
                 draw.text((bx + 10, y), lbl2, fill=s.text_color, font=self._font)
                 self._buttons.append((bx, y + 2, bx + bw2, y + LH - 2,
                                       "cycle_center"))
                 bx += bw2 + 8
                 draw.text((bx + 4, y + 1),
                           f"R={self.scope['radius_kpc']:.0f} kpc",
-                          fill=(168, 174, 188, 255), font=self._font)
+                          fill=DarkTheme.C_168_174_188_255, font=self._font)
             y += LH + 4
 
         # Footer controls
         def fbtn(bx, lbl, action, active=False):
             bb = dummy.textbbox((0, 0), lbl, font=self._font)
             bw = max(bb[2] - bb[0] + 16, LH + 8)
-            fill = (40, 62, 90, 255) if active else s.slider_btn
+            fill = DarkTheme.C_40_62_90_255 if active else s.slider_btn
             _rounded(draw, [(bx, y + 2), (bx + bw, y + LH - 2)], 8,
-                     fill=fill, outline=(255, 255, 255, 45))
+                     fill=fill, outline=DarkTheme.C_255_255_255_45)
             draw.text((bx + (bw - bb[2] + bb[0]) // 2, y), lbl,
                       fill=s.text_color, font=self._font)
             self._buttons.append((bx, y + 2, bx + bw, y + LH - 2, action))
@@ -1379,7 +1378,7 @@ class AnalysisDrawer(Panel):
             bx = fbtn(bx, ">", "next")
             bx = fbtn(bx, "Split", "profile_split", active=self._profile_split)
             bx = fbtn(bx, "CSV", "profile_csv")
-            draw.text((bx + 4, y + 1), caption, fill=(168, 174, 188, 255),
+            draw.text((bx + 4, y + 1), caption, fill=DarkTheme.C_168_174_188_255,
                       font=self._font)
         elif self.mode == "phase":
             from .analysis import PHASE_WEIGHTINGS
@@ -1448,7 +1447,7 @@ class AnalysisDrawer(Panel):
         elif self.mode == "spectrum":
             bx = M
             bx = fbtn(bx, "CSV", "spectrum_csv")
-            draw.text((bx + 6, y + 1), caption, fill=(168, 174, 188, 255),
+            draw.text((bx + 6, y + 1), caption, fill=DarkTheme.C_168_174_188_255,
                       font=self._font)
         elif self.mode == "stats":
             bx = M
@@ -1631,20 +1630,20 @@ class ColormapBrowserPanel(Panel):
         tw = max(self.COLS * cell_w + 2 * M, 380)
         th = LH + 10 + LH + rows * cell_h + M * 2
 
-        img = Image.new("RGBA", (tw, th), (0, 0, 0, 0))
+        img = Image.new("RGBA", (tw, th), DarkTheme.TRANSPARENT)
         draw = ImageDraw.Draw(img)
         _rounded(draw, [(0, 0), (tw - 1, th - 1)], s.radius,
-                 fill=s.bg_color, outline=(255, 255, 255, 30))
+                 fill=s.bg_color, outline=DarkTheme.C_255_255_255_30)
         draw.text((M, 6), "Colormaps", fill=s.accent_color,
                   font=self._font)
         cw = LH - 6
         cx0 = tw - M - cw
         _rounded(draw, [(cx0, 5), (cx0 + cw, 5 + cw)], 6,
-                 fill=(60, 34, 40, 255))
+                 fill=DarkTheme.C_60_34_40_255)
         draw.line([(cx0 + 6, 11), (cx0 + cw - 6, cw - 1)],
-                  fill=(235, 160, 160, 255), width=2)
+                  fill=DarkTheme.C_235_160_160_255, width=2)
         draw.line([(cx0 + cw - 6, 11), (cx0 + 6, cw - 1)],
-                  fill=(235, 160, 160, 255), width=2)
+                  fill=DarkTheme.C_235_160_160_255, width=2)
         self._buttons.append((cx0, 5, cx0 + cw, 5 + cw, "close"))
 
         # Tabs + reversed toggle
@@ -1654,7 +1653,7 @@ class ColormapBrowserPanel(Panel):
         for tab in CMAP_CATEGORIES:
             bb = dummy.textbbox((0, 0), tab, font=self._font)
             bw = bb[2] - bb[0] + 14
-            fill = ((30, 63, 127, 255) if tab == self.tab
+            fill = (DarkTheme.ACCENT_DIM if tab == self.tab
                     else s.slider_btn)
             _rounded(draw, [(bx, y), (bx + bw, y + LH - 6)], 7,
                      fill=fill)
@@ -1667,7 +1666,7 @@ class ColormapBrowserPanel(Panel):
         bb = dummy.textbbox((0, 0), lbl, font=self._font)
         bw = bb[2] - bb[0] + 14
         _rounded(draw, [(tw - M - bw, y), (tw - M, y + LH - 6)], 7,
-                 fill=((30, 63, 127, 255) if self.reversed
+                 fill=(DarkTheme.ACCENT_DIM if self.reversed
                        else s.slider_btn))
         draw.text((tw - M - bw + 7, y - 2), lbl, fill=s.text_color,
                   font=self._font)
@@ -1682,14 +1681,14 @@ class ColormapBrowserPanel(Panel):
             sw = self._swatch(name)
             if sw is not None:
                 img.paste(Image.fromarray(sw, "RGBA"), (x0, y0))
-            border = ((61, 126, 255, 255) if name == self.active_cmap
-                      else (255, 255, 255, 50))
+            border = (DarkTheme.ACCENT if name == self.active_cmap
+                      else DarkTheme.C_255_255_255_50)
             draw.rectangle([(x0 - 1, y0 - 1),
                             (x0 + self.SW_W, y0 + self.SW_H)],
                            outline=border)
             short = name if len(name) <= 16 else name[:15] + "…"
             draw.text((x0, y0 + self.SW_H + 1), short,
-                      fill=(168, 174, 188, 255), font=self._font)
+                      fill=DarkTheme.C_168_174_188_255, font=self._font)
             self._buttons.append((x0, y0, x0 + self.SW_W,
                                   y0 + self.SW_H + LH,
                                   ("apply_cmap", name)))
@@ -1819,24 +1818,24 @@ class FieldPickerPanel(Panel):
         n_rows = sum(1 + len(names) for _, names in groups)
         tw = 360
         th = min(LH * (n_rows + 2) + 3 * M, 720)
-        img = Image.new("RGBA", (tw, th), (0, 0, 0, 0))
+        img = Image.new("RGBA", (tw, th), DarkTheme.TRANSPARENT)
         draw = ImageDraw.Draw(img)
         _rounded(draw, [(0, 0), (tw - 1, th - 1)], s.radius,
-                 fill=s.bg_color, outline=(255, 255, 255, 30))
+                 fill=s.bg_color, outline=DarkTheme.C_255_255_255_30)
         hint = self.search or "type to search..."
         draw.text((M, 6), f"Field picker: {hint}",
                   fill=s.accent_color, font=self._font)
         cw = LH - 6
         cx0 = tw - M - cw
         _rounded(draw, [(cx0, 5), (cx0 + cw, 5 + cw)], 6,
-                 fill=(60, 34, 40, 255))
+                 fill=DarkTheme.C_60_34_40_255)
         self._buttons.append((cx0, 5, cx0 + cw, 5 + cw, "close"))
 
         y = LH + 8
         for cat, names in groups:
             if y > th - LH:
                 break
-            draw.text((M, y), cat, fill=(138, 150, 166, 255),
+            draw.text((M, y), cat, fill=DarkTheme.TEXT_SECONDARY,
                       font=self._font)
             y += LH
             for n in names:
@@ -1870,6 +1869,130 @@ class FieldPickerPanel(Panel):
                     self.enabled = False
                     return action
                 return True
+        return True
+
+    def render(self):
+        if not self.enabled:
+            return
+        super().render()
+
+
+# ---------------------------------------------------------------------------
+# Right analysis dock (Section 6.H)
+# ---------------------------------------------------------------------------
+
+DOCK_SECTIONS = [
+    ("INSPECTOR", "inspector", "I"),
+    ("PHASE DIAGRAM", "phase", "G"),
+    ("RADIAL PROFILE", "profile", "J"),
+    ("REGION STATS", "stats", "U"),
+    ("ORBIT", "orbit", "O"),
+    ("SIGHTLINES", "sightline", "sA"),
+    ("POWER SPECTRUM", "spectrum", "sK"),
+]
+
+
+class RightDock(Panel):
+    """Accordion access point for every analysis tool (Section 6.H).
+
+    Clicking a section header opens that tool's floating drawer (the
+    drawer remains the single rendering surface — per spec, the dock
+    is an always-visible alternative access point). The expanded
+    section mirrors drawer.mode; opening one collapses the others by
+    construction. A non-collapsible QUICK STATS footer shows the five
+    most recently computed headline values.
+    """
+
+    WIDTH = 300
+
+    def __init__(self):
+        super().__init__(DRAWER_STYLE)
+        self.enabled = False
+        self.style = PanelStyle(**{**DRAWER_STYLE.__dict__,
+                                   "position": "top-right",
+                                   "min_width": self.WIDTH})
+        self.anchor_offset = (0, 34)  # below the menu bar
+        from collections import deque
+
+        self.quick_stats = deque(maxlen=5)
+        self._buttons = []
+        self._last_key = None
+
+    def push_stat(self, label, value):
+        self.quick_stats.appendleft((label, value))
+        self._last_key = None
+
+    def update(self, active_mode=None):
+        if not self.enabled:
+            return
+        s = self.style
+        M, LH = s.margin, s.line_height
+        key = (active_mode, tuple(self.quick_stats),
+               self._fb_width, self._fb_height)
+        if key == self._last_key and self._tex is not None:
+            return
+        self._last_key = key
+        self._buttons = []
+
+        n_rows = len(DOCK_SECTIONS) + 2 + max(len(self.quick_stats), 1)
+        tw = self.WIDTH
+        th = LH * n_rows + 3 * M
+        img = Image.new("RGBA", (tw, th), DarkTheme.TRANSPARENT)
+        draw = ImageDraw.Draw(img)
+        _rounded(draw, [(0, 0), (tw - 1, th - 1)], s.radius,
+                 fill=s.bg_color, outline=DarkTheme.C_255_255_255_30)
+        draw.text((M, 6), "Analysis", fill=s.accent_color,
+                  font=self._font)
+        y = LH + 6
+        dummy = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
+        for name, mode, badge in DOCK_SECTIONS:
+            active = mode == active_mode
+            if active:
+                _rounded(draw, [(4, y), (tw - 4, y + LH - 2)], 8,
+                         fill=DarkTheme.ACCENT_DIM)
+            caret = "v" if active else ">"
+            draw.text((M, y), f"{caret} {name}",
+                      fill=s.text_color if active
+                      else DarkTheme.C_168_174_188_255, font=self._font)
+            bb = dummy.textbbox((0, 0), badge, font=self._font)
+            _rounded(draw, [(tw - M - (bb[2] - bb[0]) - 12, y + 2),
+                            (tw - M, y + LH - 4)], 6,
+                     fill=s.slider_btn)
+            draw.text((tw - M - (bb[2] - bb[0]) - 6, y), badge,
+                      fill=s.text_color, font=self._font)
+            self._buttons.append((0, y, tw, y + LH, ("dock", mode)))
+            y += LH
+        # QUICK STATS footer
+        y += 4
+        draw.line([(M, y), (tw - M, y)], fill=DarkTheme.C_255_255_255_30)
+        draw.text((M, y + 2), "QUICK STATS",
+                  fill=DarkTheme.TEXT_SECONDARY, font=self._font)
+        y += LH
+        if not self.quick_stats:
+            draw.text((M, y), "(nothing computed yet)",
+                      fill=DarkTheme.TEXT_DISABLED, font=self._font)
+            y += LH
+        for label, value in self.quick_stats:
+            draw.text((M, y), label, fill=DarkTheme.C_168_174_188_255,
+                      font=self._font)
+            bb = dummy.textbbox((0, 0), str(value), font=self._font)
+            draw.text((tw - M - (bb[2] - bb[0]), y), str(value),
+                      fill=s.text_color, font=self._font)
+            y += LH
+
+        self._panel_w, self._panel_h = tw, th
+        self._panel_x, self._panel_y = self._panel_origin(tw, th)
+        self._upload_panel(tw, th, img.tobytes())
+
+    def on_click(self, x, y):
+        if not self.enabled:
+            return False
+        lx, ly = x - self._panel_x, y - self._panel_y
+        if not (0 <= lx <= self._panel_w and 0 <= ly <= self._panel_h):
+            return False
+        for x0, y0, x1, y1, action in self._buttons:
+            if x0 <= lx <= x1 and y0 <= ly <= y1:
+                return action
         return True
 
     def render(self):

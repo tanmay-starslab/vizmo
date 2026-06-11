@@ -4,6 +4,7 @@ backend-agnostic widget layout, hit-testing, and PIL rendering.
 """
 
 from PIL import Image, ImageDraw, ImageFont
+from .themes import DarkTheme
 from dataclasses import dataclass
 
 
@@ -44,8 +45,8 @@ class PanelStyle:
     dropdown_bg: tuple
     dropdown_hover: tuple
     slider_btn: tuple
-    field_bg: tuple = (30, 30, 30, 255)
-    field_active: tuple = (50, 50, 80, 255)
+    field_bg: tuple = DarkTheme.C_30_30_30_255
+    field_active: tuple = DarkTheme.C_50_50_80_255
     position: str = "top-right"  # "top-right", "top-left", "bottom-left", or "center"
     font_family: str = "monospace"
     radius: int = 10  # panel corner radius (px at 1080p reference)
@@ -53,40 +54,40 @@ class PanelStyle:
 
 DEV_STYLE = PanelStyle(
     font_size=14, line_height=20, margin=8, min_width=200,
-    bg_color=(0, 0, 0, 200),
-    text_color=(0, 255, 0, 255),
-    accent_color=(0, 255, 0, 255),
-    toggle_on_color=(0, 200, 0, 255),
-    toggle_off_color=(150, 50, 50, 255),
-    dropdown_bg=(40, 40, 40, 255),
-    dropdown_hover=(80, 80, 120, 255),
-    slider_btn=(80, 80, 80, 255),
+    bg_color=DarkTheme.C_0_0_0_200,
+    text_color=DarkTheme.C_0_255_0_255,
+    accent_color=DarkTheme.C_0_255_0_255,
+    toggle_on_color=DarkTheme.C_0_200_0_255,
+    toggle_off_color=DarkTheme.C_150_50_50_255,
+    dropdown_bg=DarkTheme.C_40_40_40_255,
+    dropdown_hover=DarkTheme.C_80_80_120_255,
+    slider_btn=DarkTheme.C_80_80_80_255,
     position="top-right",
 )
 
 SINK_STYLE = PanelStyle(
     font_size=14, line_height=20, margin=8, min_width=220,
-    bg_color=(20, 10, 30, 220),
-    text_color=(220, 220, 255, 255),
-    accent_color=(180, 180, 255, 255),
-    toggle_on_color=(120, 160, 255, 255),
-    toggle_off_color=(100, 100, 110, 255),
-    dropdown_bg=(40, 40, 60, 255),
-    dropdown_hover=(80, 80, 120, 255),
-    slider_btn=(80, 80, 100, 255),
+    bg_color=DarkTheme.C_20_10_30_220,
+    text_color=DarkTheme.C_220_220_255_255,
+    accent_color=DarkTheme.C_180_180_255_255,
+    toggle_on_color=DarkTheme.C_120_160_255_255,
+    toggle_off_color=DarkTheme.C_100_100_110_255,
+    dropdown_bg=DarkTheme.C_40_40_60_255,
+    dropdown_hover=DarkTheme.C_80_80_120_255,
+    slider_btn=DarkTheme.C_80_80_100_255,
     position="top-right",
 )
 
 HELP_STYLE = PanelStyle(
     font_size=18, line_height=26, margin=14, min_width=420,
-    bg_color=(14, 16, 26, 238),
-    text_color=(228, 231, 238, 255),
-    accent_color=(120, 190, 255, 255),
-    toggle_on_color=(120, 190, 255, 255),
-    toggle_off_color=(150, 150, 160, 255),
-    dropdown_bg=(30, 30, 40, 255),
-    dropdown_hover=(80, 100, 140, 255),
-    slider_btn=(70, 75, 90, 255),
+    bg_color=DarkTheme.C_14_16_26_238,
+    text_color=DarkTheme.C_228_231_238_255,
+    accent_color=DarkTheme.C_120_190_255_255,
+    toggle_on_color=DarkTheme.C_120_190_255_255,
+    toggle_off_color=DarkTheme.C_150_150_160_255,
+    dropdown_bg=DarkTheme.C_30_30_40_255,
+    dropdown_hover=DarkTheme.C_80_100_140_255,
+    slider_btn=DarkTheme.C_70_75_90_255,
     position="center",
     font_family="sans-serif",
     radius=14,
@@ -94,14 +95,14 @@ HELP_STYLE = PanelStyle(
 
 USER_STYLE = PanelStyle(
     font_size=28, line_height=38, margin=14, min_width=280,
-    bg_color=(16, 18, 28, 170),
-    text_color=(228, 231, 238, 255),
-    accent_color=(100, 180, 255, 255),
-    toggle_on_color=(100, 180, 255, 255),
-    toggle_off_color=(110, 115, 130, 255),
-    dropdown_bg=(34, 37, 50, 255),
-    dropdown_hover=(80, 100, 140, 255),
-    slider_btn=(64, 70, 88, 255),
+    bg_color=DarkTheme.C_16_18_28_170,
+    text_color=DarkTheme.C_228_231_238_255,
+    accent_color=DarkTheme.C_100_180_255_255,
+    toggle_on_color=DarkTheme.C_100_180_255_255,
+    toggle_off_color=DarkTheme.C_110_115_130_255,
+    dropdown_bg=DarkTheme.C_34_37_50_255,
+    dropdown_hover=DarkTheme.C_80_100_140_255,
+    slider_btn=DarkTheme.C_64_70_88_255,
     position="bottom-left",
     font_family="sans-serif",
     radius=14,
@@ -109,14 +110,14 @@ USER_STYLE = PanelStyle(
 
 TOOLBAR_STYLE = PanelStyle(
     font_size=22, line_height=34, margin=10, min_width=10,
-    bg_color=(16, 18, 28, 170),
-    text_color=(228, 231, 238, 255),
-    accent_color=(100, 180, 255, 255),
-    toggle_on_color=(100, 180, 255, 255),
-    toggle_off_color=(110, 115, 130, 255),
-    dropdown_bg=(34, 37, 50, 255),
-    dropdown_hover=(80, 100, 140, 255),
-    slider_btn=(64, 70, 88, 255),
+    bg_color=DarkTheme.C_16_18_28_170,
+    text_color=DarkTheme.C_228_231_238_255,
+    accent_color=DarkTheme.C_100_180_255_255,
+    toggle_on_color=DarkTheme.C_100_180_255_255,
+    toggle_off_color=DarkTheme.C_110_115_130_255,
+    dropdown_bg=DarkTheme.C_34_37_50_255,
+    dropdown_hover=DarkTheme.C_80_100_140_255,
+    slider_btn=DarkTheme.C_64_70_88_255,
     position="top-left",
     font_family="sans-serif",
     radius=12,
@@ -272,11 +273,11 @@ class Panel:
         tw = max_w + M * 2
         th = (n_lines + dropdown_extra + ptype_extra) * LH + M * 2
 
-        img = Image.new("RGBA", (tw, th), (0, 0, 0, 0))
+        img = Image.new("RGBA", (tw, th), DarkTheme.TRANSPARENT)
         draw = ImageDraw.Draw(img)
         # Panel chrome: rounded card with a hairline border.
         _rounded(draw, [(0, 0), (tw - 1, th - 1)], s.radius, fill=s.bg_color,
-                 outline=(255, 255, 255, 30), width=1)
+                 outline=DarkTheme.C_255_255_255_30, width=1)
         y = M
         self._widgets = []
         r_widget = max(4, s.radius // 2)
@@ -299,7 +300,7 @@ class Panel:
                 bbox = draw.textbbox((0, 0), label, font=self._font)
                 bw = bbox[2] - bbox[0] + 20
                 _rounded(draw, [(M, y + 2), (M + bw, y + LH - 2)], r_widget,
-                         fill=s.slider_btn, outline=(255, 255, 255, 60))
+                         fill=s.slider_btn, outline=DarkTheme.C_255_255_255_60)
                 draw.text((M + 10, y), label, fill=s.text_color, font=self._font)
                 self._widgets.append((y, y + LH, "button", key, M, M + bw))
                 y += LH
@@ -315,9 +316,9 @@ class Panel:
                     bbox = draw.textbbox((0, 0), label, font=self._font)
                     bw = bbox[2] - bbox[0] + 28
                     fill = s.accent_color if active else s.slider_btn
-                    txt_col = (15, 18, 28, 255) if active else s.text_color
+                    txt_col = DarkTheme.C_15_18_28_255 if active else s.text_color
                     _rounded(draw, [(x, y + 2), (x + bw, y + LH - 2)], r_widget,
-                             fill=fill, outline=(255, 255, 255, 60))
+                             fill=fill, outline=DarkTheme.C_255_255_255_60)
                     draw.text((x + 14, y), label, fill=txt_col, font=self._font)
                     self._widgets.append((y, y + LH, "hbutton", bkey, x, x + bw))
                     x += bw + 8
@@ -329,13 +330,13 @@ class Panel:
                 pill_w = int(LH * 1.5)
                 pill_h = LH - 8
                 py0 = y + (LH - pill_h) // 2
-                track = s.toggle_on_color if state else (60, 64, 78, 255)
+                track = s.toggle_on_color if state else DarkTheme.C_60_64_78_255
                 _rounded(draw, [(M, py0), (M + pill_w, py0 + pill_h)],
                          pill_h // 2, fill=track)
                 kr = pill_h - 4
                 kx = M + pill_w - kr - 2 if state else M + 2
                 draw.ellipse([kx, py0 + 2, kx + kr, py0 + 2 + kr],
-                             fill=(240, 242, 248, 255))
+                             fill=DarkTheme.C_240_242_248_255)
                 draw.text((M + pill_w + 10, y), label, fill=s.text_color, font=self._font)
                 self._widgets.append((y, y + LH, "toggle", key))
                 y += LH
@@ -347,7 +348,7 @@ class Panel:
                 row_bg = s.dropdown_hover if is_open else None
                 if row_bg:
                     _rounded(draw, [(M - 4, y + 1), (tw - M + 4, y + LH - 1)],
-                             r_widget, fill=(255, 255, 255, 18))
+                             r_widget, fill=DarkTheme.C_255_255_255_18)
                 draw.text((M, y), f"{arrow} {label}: ", fill=s.accent_color, font=self._font)
                 lab_w = draw.textlength(f"{arrow} {label}: ", font=self._font)
                 draw.text((M + lab_w, y), str(current), fill=s.text_color, font=self._font)
@@ -360,7 +361,7 @@ class Panel:
                     if scrollable:
                         scroll = max(0, min(scroll, n_opts - max_dd_visible))
                         self._dropdown_scroll[key] = scroll
-                        arrow_color = s.accent_color if scroll > 0 else (80, 80, 80, 255)
+                        arrow_color = s.accent_color if scroll > 0 else DarkTheme.C_80_80_80_255
                         draw.text((M + 30, y), f"^ ({scroll} more)", fill=arrow_color, font=self._font)
                         self._widgets.append((y, y + LH, "dropdown_scroll", key, -3))
                         y += LH
@@ -372,13 +373,13 @@ class Panel:
                                      r_widget, fill=s.dropdown_hover)
                         elif i % 2 == 0:
                             draw.rectangle([(M + 10, y), (tw - M, y + LH - 1)],
-                                           fill=(255, 255, 255, 10))
+                                           fill=DarkTheme.C_255_255_255_10)
                         draw.text((M + 15, y), str(opt), fill=s.text_color, font=self._font)
                         self._widgets.append((y, y + LH, "dropdown_item", key, opt))
                         y += LH
                     if scrollable:
                         remaining = n_opts - vis_end
-                        arrow_color = s.accent_color if remaining > 0 else (80, 80, 80, 255)
+                        arrow_color = s.accent_color if remaining > 0 else DarkTheme.C_80_80_80_255
                         draw.text((M + 30, y), f"v ({remaining} more)", fill=arrow_color, font=self._font)
                         self._widgets.append((y, y + LH, "dropdown_scroll", key, 3))
                         y += LH
@@ -409,7 +410,7 @@ class Panel:
                 if tx1 - tx0 > 12 and vmax > vmin:
                     frac = min(1.0, max(0.0, (value - vmin) / (vmax - vmin)))
                     _rounded(draw, [(tx0, tcy - 3), (tx1, tcy + 3)], 3,
-                             fill=(50, 54, 68, 255))
+                             fill=DarkTheme.C_50_54_68_255)
                     fx = tx0 + int((tx1 - tx0) * frac)
                     if fx > tx0:
                         _rounded(draw, [(tx0, tcy - 3), (fx, tcy + 3)], 3,
@@ -430,10 +431,10 @@ class Panel:
                     box_w = max(LH - 4, tw_ + 14)
                     on = p in selected
                     fill = s.toggle_on_color if on else s.field_bg
-                    txt_col = (15, 18, 28, 255) if on else s.text_color
+                    txt_col = DarkTheme.C_15_18_28_255 if on else s.text_color
                     _rounded(draw, [(indent, y + 2), (indent + box_w, y + LH - 4)],
                              (LH - 6) // 2, fill=fill,
-                             outline=(255, 255, 255, 60))
+                             outline=DarkTheme.C_255_255_255_60)
                     draw.text(
                         (indent + (box_w - tw_) // 2, y),
                         txt,
@@ -454,7 +455,7 @@ class Panel:
                 field_bg = s.field_active if active else s.field_bg
                 _rounded(draw, [(field_x, y), (tw - M, y + LH - 2)], r_widget,
                          fill=field_bg,
-                         outline=s.accent_color if active else (255, 255, 255, 40))
+                         outline=s.accent_color if active else DarkTheme.C_255_255_255_40)
                 draw.text((field_x + 8, y), value,
                           fill=s.accent_color if active else s.text_color, font=self._font)
                 self._widgets.append((y, y + LH, "field", key))
@@ -467,7 +468,14 @@ class Panel:
 
         self._panel_x, self._panel_y = self._panel_origin(tw, th)
 
-        self._upload_panel(tw, th, data)
+        # Drop shadow (Item 1): paste the panel over a +3px offset dark
+        # rounded rect. Widget hit-testing keeps the unshadowed size.
+        canvas = Image.new("RGBA", (tw + 4, th + 4), DarkTheme.TRANSPARENT)
+        cdraw = ImageDraw.Draw(canvas)
+        _rounded(cdraw, [(3, 3), (tw + 2, th + 2)], s.radius,
+                 fill=DarkTheme.SHADOW)
+        canvas.alpha_composite(img, (0, 0))
+        self._upload_panel(tw + 4, th + 4, canvas.tobytes())
 
     def _panel_origin(self, tw, th):
         """Top-left pixel of the panel for the style's anchor position."""
@@ -1303,7 +1311,7 @@ class UserMenu(Panel):
         total_w = cbar_w + label_pad + label_w
         total_h = cbar_h + LH
 
-        img = Image.new("RGBA", (total_w, total_h), (0, 0, 0, 0))
+        img = Image.new("RGBA", (total_w, total_h), DarkTheme.TRANSPARENT)
         draw = ImageDraw.Draw(img)
 
         cbar_top = LH // 2
@@ -1317,7 +1325,7 @@ class UserMenu(Panel):
                 draw.rectangle([(0, cbar_top + j), (cbar_w, cbar_top + j)], fill=c)
         except Exception:
             draw.rectangle([(0, cbar_top), (cbar_w, cbar_top + cbar_h)],
-                           fill=(128, 128, 128, 255))
+                           fill=DarkTheme.C_128_128_128_255)
         draw.rectangle([(0, cbar_top), (cbar_w, cbar_top + cbar_h)], outline=self.style.text_color)
 
         label_x = cbar_w + label_pad
@@ -1537,14 +1545,14 @@ def build_default_menus(recent_paths=()):
 
 MENUBAR_STYLE = PanelStyle(
     font_size=15, line_height=26, margin=10, min_width=10,
-    bg_color=(19, 24, 31, 235),       # DarkTheme.BG_SURFACE
-    text_color=(232, 237, 243, 255),  # DarkTheme.TEXT_PRIMARY
-    accent_color=(61, 126, 255, 255),  # DarkTheme.ACCENT
-    toggle_on_color=(61, 126, 255, 255),
-    toggle_off_color=(138, 150, 166, 255),
-    dropdown_bg=(26, 33, 42, 255),    # DarkTheme.BG_RAISED
-    dropdown_hover=(30, 63, 127, 255),
-    slider_btn=(26, 33, 42, 255),
+    bg_color=DarkTheme.BG_SURFACE,       # DarkTheme.BG_SURFACE
+    text_color=DarkTheme.TEXT_PRIMARY,  # DarkTheme.TEXT_PRIMARY
+    accent_color=DarkTheme.ACCENT,  # DarkTheme.ACCENT
+    toggle_on_color=DarkTheme.ACCENT,
+    toggle_off_color=DarkTheme.TEXT_SECONDARY,
+    dropdown_bg=DarkTheme.BG_RAISED,    # DarkTheme.BG_RAISED
+    dropdown_hover=DarkTheme.ACCENT_DIM,
+    slider_btn=DarkTheme.BG_RAISED,
     position="top-left",
     font_family="sans-serif",
     radius=0,
@@ -1628,12 +1636,12 @@ class MenuBar(Panel):
 
         th = bar_h + (dd_h if dd_items else 0) + max(sub_h - dd_h, 0) + 4
         tw = fb_w
-        img = Image.new("RGBA", (tw, th), (0, 0, 0, 0))
+        img = Image.new("RGBA", (tw, th), DarkTheme.TRANSPARENT)
         draw = ImageDraw.Draw(img)
         # Bar background + 1px bottom border (DarkTheme.BORDER).
         draw.rectangle([(0, 0), (tw, bar_h - 1)], fill=s.bg_color)
         draw.rectangle([(0, bar_h - 1), (tw, bar_h)],
-                       fill=(30, 39, 48, 255))
+                       fill=DarkTheme.BORDER)
 
         self._title_zones = []
         x = s.margin
@@ -1642,7 +1650,7 @@ class MenuBar(Panel):
             w = bb[2] - bb[0] + 2 * s.margin
             if name == self.open_menu:
                 draw.rectangle([(x - 4, 2), (x + w - s.margin, bar_h - 3)],
-                               fill=(30, 63, 127, 255))
+                               fill=DarkTheme.ACCENT_DIM)
             draw.text((x, (bar_h - s.font_size) // 2 - 2), name,
                       fill=s.text_color, font=self._font)
             self._title_zones.append((x - 4, x + w - s.margin, name))
@@ -1657,24 +1665,24 @@ class MenuBar(Panel):
             self._dd_origin = (dx, dy)
             draw.rounded_rectangle([dx, dy, dx + dd_w, dy + dd_h],
                                    radius=6, fill=s.dropdown_bg,
-                                   outline=(30, 39, 48, 255))
+                                   outline=DarkTheme.BORDER)
             yy = dy + 4
             for i, it in enumerate(dd_items):
                 if it.separator:
                     draw.line([(dx + 8, yy + 3), (dx + dd_w - 8, yy + 3)],
-                              fill=(30, 39, 48, 255), width=1)
+                              fill=DarkTheme.BORDER, width=1)
                     yy += 8
                     continue
                 if i == self.open_submenu:
                     draw.rectangle([(dx + 2, yy), (dx + dd_w - 2, yy + row_h)],
-                                   fill=(30, 63, 127, 255))
+                                   fill=DarkTheme.ACCENT_DIM)
                 draw.text((dx + 10, yy + 2), it.label, fill=s.text_color,
                           font=self._font)
                 tail = "▶" if it.submenu else (it.shortcut or "")
                 if tail:
                     bb = dummy.textbbox((0, 0), tail, font=self._font)
                     draw.text((dx + dd_w - 10 - (bb[2] - bb[0]), yy + 2),
-                              tail, fill=(138, 150, 166, 255),
+                              tail, fill=DarkTheme.TEXT_SECONDARY,
                               font=self._font)
                 self._row_zones.append((yy, yy + row_h, i, it, False))
                 yy += row_h
@@ -1687,7 +1695,7 @@ class MenuBar(Panel):
                 self._sub_origin = (sx, sy)
                 draw.rounded_rectangle([sx, sy, sx + sub_w, sy + sub_h],
                                        radius=6, fill=s.dropdown_bg,
-                                       outline=(30, 39, 48, 255))
+                                       outline=DarkTheme.BORDER)
                 yy = sy + 4
                 for it in sub_items:
                     if it.separator:
@@ -1700,7 +1708,7 @@ class MenuBar(Panel):
                                             font=self._font)
                         draw.text((sx + sub_w - 10 - (bb[2] - bb[0]),
                                    yy + 2), it.shortcut,
-                                  fill=(138, 150, 166, 255),
+                                  fill=DarkTheme.TEXT_SECONDARY,
                                   font=self._font)
                     self._row_zones.append((yy, yy + row_h, -1, it, True))
                     yy += row_h

@@ -56,5 +56,6 @@ KEYBINDINGS = [
     ("F1 or H", "Toggle this help"),
     ("Left / Right", "Previous / next snapshot (--series)"),
     ("Ctrl+O / Ctrl+Q", "Open file dialog / quit"),
+    ("Ctrl+Shift+D", "Toggle the right analysis dock"),
     ("Esc", "Quit"),
 ]

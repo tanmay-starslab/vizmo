@@ -273,6 +273,9 @@ def run_wgpu_app(
     _recents.add(snapshot_path)
     menubar = WGPUMenuBar(device, present_format,
                           build_default_menus(_recents.get()))
+    from .wgpu_overlay import WGPURightDock
+
+    right_dock = WGPURightDock(device, present_format)
     cmap_browser = WGPUColormapBrowser(device, present_format)
     field_picker = WGPUFieldPicker(device, present_format)
     overlay = WGPUDevOverlay(device, present_format)
@@ -1117,6 +1120,9 @@ def run_wgpu_app(
                 _dispatch_menu_action("open_file")
             elif key == glfw.KEY_Q and (mods & glfw.MOD_CONTROL):
                 _dispatch_menu_action("quit")
+            elif (key == glfw.KEY_D and (mods & glfw.MOD_CONTROL)
+                    and (mods & glfw.MOD_SHIFT)):
+                right_dock.enabled = not right_dock.enabled
             elif key == glfw.KEY_F10:
                 profiler_panel.enabled = not profiler_panel.enabled
                 toasts.show(
@@ -1364,6 +1370,11 @@ def run_wgpu_app(
             if mb_action:
                 if mb_action is not True:
                     _dispatch_menu_action(mb_action)
+                return
+            dk_action = right_dock.on_click(x, y)
+            if dk_action:
+                if isinstance(dk_action, tuple) and dk_action[0] == "dock":
+                    drawer.toggle(dk_action[1])
                 return
             cb_action = cmap_browser.on_click(x, y)
             if cb_action:
@@ -2184,6 +2195,8 @@ def run_wgpu_app(
                     f"Orbit: peri={props['r_peri']:.1f} apo="
                     f"{props['r_apo']:.1f} kpc e={props['eccentricity']:.2f}",
                     "ok")
+                right_dock.push_stat(
+                    "orbit e", f"{props['eccentricity']:.2f}")
             drawer._last_orbit = (o, props)
             # 3D orbit trail: reuse the streamline line-strip pipeline,
             # colored by time through the active colormap, positioned
@@ -2544,6 +2557,10 @@ def run_wgpu_app(
                         try:
                             compute_los_column_densities(sl, data)
                             _sightlines["list"].append(sl)
+                            if sl.NHI:
+                                right_dock.push_stat(
+                                    f"{sl.label} log NHI",
+                                    f"{np.log10(sl.NHI):.1f}")
                             sightline_overlay.enabled = True
                             drawer.enabled = True
                             drawer.mode = "sightline"
@@ -3064,6 +3081,10 @@ def run_wgpu_app(
                           menubar, cmap_browser, field_picker):
                     p.set_framebuffer_size(fb_w, fb_h)
                 menubar.update()
+                right_dock.set_framebuffer_size(fb_w, fb_h)
+                if right_dock.enabled:
+                    right_dock.update(
+                        drawer.mode if drawer.enabled else None)
                 if cmap_browser.enabled:
                     cmap_browser.update()
                 if field_picker.enabled:
@@ -3258,6 +3279,8 @@ def run_wgpu_app(
                     help_panel.render_to_pass(rpass)
                 if profiler_panel.enabled:
                     profiler_panel.render_to_pass(rpass)
+                if right_dock.enabled:
+                    right_dock.render_to_pass(rpass)
                 menubar.render_to_pass(rpass)
                 if cmap_browser.enabled:
                     cmap_browser.render_to_pass(rpass)
