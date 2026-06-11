@@ -177,18 +177,36 @@ def compute_los_column_densities(
     h_cm = h[cand] * units.unit_length_cgs * units.a / units.h
     m_g = (data.masses[cand].astype(np.float64)
            * units.unit_mass_cgs / units.h)
-    q = d / h[cand]
-    ck = column_kernel(q)
-    # Hydrogen atoms per cm^2 contributed by each particle.
-    n_h_col = m_g * XH_DEFAULT / PROTONMASS_CGS * ck / h_cm**2
+    # Per-particle coefficient: H atoms per cm^2 before the kernel
+    # geometry factor c(q)/h^2.
+    coeff = m_g * XH_DEFAULT / PROTONMASS_CGS
 
-    sightline.N_total_H = float(n_h_col.sum())
+    from . import fast_ops
+
+    if fast_ops.HAVE_NUMBA:
+        # numba path: kernel-column geometry recomputed per species in
+        # code units, then rescaled to cm^-2 (h_code^2 -> h_cm^2).
+        len_cm = units.unit_length_cgs * units.a / units.h
+
+        def _col(vals):
+            raw = fast_ops.los_column_density(a, b, pos[cand], vals,
+                                              h[cand])
+            return float(raw / len_cm**2)
+
+        sightline.N_total_H = _col(coeff)
+        n_h_col = None
+    else:
+        q = d / h[cand]
+        ck = column_kernel(q)
+        n_h_col = coeff * ck / h_cm**2
+        sightline.N_total_H = float(n_h_col.sum())
 
     avail = set(data.available_fields())
     if n_h_field in avail:
         x_hi = np.clip(np.asarray(data.get_field(n_h_field),
                                   dtype=np.float64)[cand], 0.0, 1.0)
-        sightline.NHI = float((n_h_col * x_hi).sum())
+        sightline.NHI = (_col(coeff * x_hi) if n_h_col is None
+                         else float((n_h_col * x_hi).sum()))
     else:
         sightline.NHI = None
 
@@ -205,8 +223,12 @@ def compute_los_column_densities(
                           ("MgII", "N_MgII")):
             frac = cie_ion_fraction(ion, t)
             abund = CIE_IONS[ion]["abund"]
-            setattr(sightline, attr,
-                    float((n_h_col * abund * zfac * frac).sum()))
+            if n_h_col is None:
+                setattr(sightline, attr,
+                        _col(coeff * abund * zfac * frac))
+            else:
+                setattr(sightline, attr,
+                        float((n_h_col * abund * zfac * frac).sum()))
     except Exception:
         sightline.N_OVI = sightline.N_CIV = sightline.N_MgII = None
 

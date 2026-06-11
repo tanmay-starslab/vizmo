@@ -89,3 +89,29 @@ def test_checksum_cache_key(tmp_path):
     # Content change must change the key.
     p2.write_bytes(b"y" * 100000)
     assert _snapshot_content_key(str(p2)) != k1
+
+
+def test_profiler_overlay_layout():
+    from vizmo.science_panels import ProfilerOverlay
+
+    p = ProfilerOverlay()
+    p.enabled = True
+    p.set_framebuffer_size(1920, 1080)
+    p.update({"accum": 12.4, "resolve": 1.2, "overlay": 0.6},
+             total_ms=14.8, gpu_timed=True)
+    assert p._panel_w > 200 and p._panel_h > 60
+    # CPU-labelled variant renders too.
+    p.update({"render": 30.0}, total_ms=33.0, gpu_timed=False)
+    assert p._panel_h > 40
+
+
+def test_vizmo_cache_mb(tmp_path, monkeypatch):
+    import os
+
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    d = tmp_path / "vizmo" / "hsml"
+    d.mkdir(parents=True)
+    (d / "x.npy").write_bytes(b"0" * 2_000_000)
+    from vizmo.science_panels import vizmo_cache_mb
+
+    assert vizmo_cache_mb() == pytest.approx(2.0, rel=0.01)

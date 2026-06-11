@@ -1929,7 +1929,9 @@ class WGPURenderer:
 
         for lvl in range(n_levels):
             views = level_views[lvl]
+            _tsw_a = self.ts_writes(0, 1)
             render_pass = encoder.begin_render_pass(
+                **({"timestamp_writes": _tsw_a} if _tsw_a else {}),
                 color_attachments=[
                     {"view": views[0], "clear_value": (0, 0, 0, 0), "load_op": "clear", "store_op": "store"},
                     {"view": views[1], "clear_value": (0, 0, 0, 0), "load_op": "clear", "store_op": "store"},
@@ -2026,6 +2028,7 @@ class WGPURenderer:
                 ],
             )
 
+        _tsw = self.ts_writes(2, 3)
         render_pass = encoder.begin_render_pass(
             color_attachments=[
                 {
@@ -2035,6 +2038,7 @@ class WGPURenderer:
                     "store_op": "store",
                 }
             ],
+            **({"timestamp_writes": _tsw} if _tsw else {}),
         )
         render_pass.set_pipeline(self._resolve_pipeline)
         render_pass.set_bind_group(0, self._resolve_bg)
@@ -3543,3 +3547,69 @@ class VolumeRenderer:
         rpass.set_pipeline(self._pipeline)
         rpass.set_bind_group(0, self._bg)
         rpass.draw(3)
+
+
+# ---------------------------------------------------------------------------
+# GPU pass timing via timestamp queries (Item 4)
+# ---------------------------------------------------------------------------
+
+def _init_gpu_timing(renderer):
+    """Create the timestamp QuerySet (8 slots) when the device has the
+    timestamp-query feature. Returns True on success."""
+    dev = renderer.device
+    try:
+        if "timestamp-query" not in dev.features:
+            return False
+        renderer._ts_query_set = dev.create_query_set(
+            type="timestamp", count=8)
+        renderer._ts_resolve_buf = dev.create_buffer(
+            size=8 * 8, usage=(wgpu.BufferUsage.QUERY_RESOLVE
+                               | wgpu.BufferUsage.COPY_SRC))
+        renderer.pass_times_ms = {}
+        renderer._ts_ema = {}
+        renderer._gpu_timing_ok = True
+        return True
+    except Exception as e:
+        print(f"  gpu timing unavailable: {e}")
+        renderer._gpu_timing_ok = False
+        return False
+
+
+def _ts_writes(renderer, begin_idx, end_idx):
+    """timestamp_writes descriptor for a render pass, or None."""
+    if not getattr(renderer, "_gpu_timing_ok", False):
+        return None
+    return {"query_set": renderer._ts_query_set,
+            "beginning_of_pass_write_index": begin_idx,
+            "end_of_pass_write_index": end_idx}
+
+
+def _read_gpu_timings(renderer):
+    """Resolve + read the query set; update the EMA dict. Call at most
+    ~1 Hz — does a blocking readback."""
+    if not getattr(renderer, "_gpu_timing_ok", False):
+        return {}
+    try:
+        dev = renderer.device
+        enc = dev.create_command_encoder()
+        enc.resolve_query_set(renderer._ts_query_set, 0, 8,
+                              renderer._ts_resolve_buf, 0)
+        dev.queue.submit([enc.finish()])
+        raw = np.frombuffer(dev.queue.read_buffer(
+            renderer._ts_resolve_buf), dtype=np.uint64)
+        pairs = {"accum": (0, 1), "resolve": (2, 3)}
+        for name, (i0, i1) in pairs.items():
+            if raw[i1] > raw[i0]:
+                ms = float(raw[i1] - raw[i0]) / 1e6
+                prev = renderer._ts_ema.get(name, ms)
+                renderer._ts_ema[name] = 0.8 * prev + 0.2 * ms
+        renderer.pass_times_ms = dict(renderer._ts_ema)
+        return renderer.pass_times_ms
+    except Exception:
+        renderer._gpu_timing_ok = False
+        return {}
+
+
+WGPURenderer.init_gpu_timing = _init_gpu_timing
+WGPURenderer.read_gpu_timings = _read_gpu_timings
+WGPURenderer.ts_writes = _ts_writes

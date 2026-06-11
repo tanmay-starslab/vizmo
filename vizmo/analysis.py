@@ -430,6 +430,17 @@ def radial_profile(data, field, center=None, r_min_kpc=None, r_max_kpc=None,
         return centers, prof, unit
     else:
         vals = np.asarray(data.get_field(field), dtype=np.float64)[sel]
+        from . import fast_ops
+
+        if fast_ops.HAVE_NUMBA:
+            # numba-parallel binning (equivalence-tested vs bincount).
+            _, msum_f, fsum = fast_ops.radial_profile_bins(
+                center * units.length_to_kpc,
+                pos[sel] * units.length_to_kpc, mass, vals, edges)
+            with np.errstate(invalid="ignore", divide="ignore"):
+                prof = fsum / msum_f
+            prof[msum_f == 0] = np.nan
+            return centers, prof, field_unit_label(field)
         wsum = np.bincount(which[ok], weights=(mass * vals)[ok], minlength=n_bins)
         with np.errstate(invalid="ignore", divide="ignore"):
             prof = wsum / msum

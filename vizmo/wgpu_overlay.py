@@ -18,6 +18,7 @@ from .science_panels import (
     AnalysisDrawer,
     ApertureOverlay,
     SightlinesOverlay,
+    ProfilerOverlay,
 )
 
 SHADER_DIR = Path(__file__).parent / "shaders"
@@ -214,6 +215,12 @@ class WGPUApertureOverlay(_WGPUPanelMixin, ApertureOverlay):
 class WGPUSightlinesOverlay(_WGPUPanelMixin, SightlinesOverlay):
     def __init__(self, device, present_format):
         SightlinesOverlay.__init__(self)
+        self._init_wgpu(device, present_format)
+
+
+class WGPUProfilerOverlay(_WGPUPanelMixin, ProfilerOverlay):
+    def __init__(self, device, present_format):
+        ProfilerOverlay.__init__(self)
         self._init_wgpu(device, present_format)
 
 

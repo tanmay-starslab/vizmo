@@ -628,6 +628,11 @@ class DevOverlay(Panel):
         if message:
             items.append(("text", message))
 
+        mem = kwargs.get("mem")
+        if mem:
+            items.append(("text", "--- memory ---"))
+            for k, v in mem.items():
+                items.append(("kv", k, v))
         self.render_panel(items)
 
     def render(self):

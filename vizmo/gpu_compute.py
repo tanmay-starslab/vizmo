@@ -325,3 +325,36 @@ class GPUCompute:
         self.gpu_number_density_buffer = out_n
         self.derived_fields_gpu = True
         return temp, nh
+
+
+    # -- GPU memory accounting (Item 5) -------------------------------------
+
+    def gpu_buffer_bytes(self):
+        """Best-effort sum of wgpu buffer sizes reachable from this
+        object (chunk lists, slot dicts, direct attributes). Buffers
+        are deduplicated by id; returns bytes."""
+        seen = set()
+        total = 0
+
+        def scan(obj, depth=0):
+            nonlocal total
+            if depth > 3 or id(obj) in seen:
+                return
+            seen.add(id(obj))
+            tname = type(obj).__name__
+            if tname == "GPUBuffer":
+                try:
+                    total += int(obj.size)
+                except Exception:
+                    pass
+                return
+            if isinstance(obj, dict):
+                for v in obj.values():
+                    scan(v, depth + 1)
+            elif isinstance(obj, (list, tuple)):
+                for v in obj:
+                    scan(v, depth + 1)
+
+        for v in self.__dict__.values():
+            scan(v)
+        return total

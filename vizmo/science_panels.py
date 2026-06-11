@@ -487,6 +487,88 @@ class ApertureOverlay(Panel):
         super().render()
 
 
+def vizmo_cache_mb():
+    """Size of ~/.cache/vizmo (smoothing-length cache etc.) in MB."""
+    import os
+
+    base = os.environ.get("XDG_CACHE_HOME",
+                          os.path.expanduser("~/.cache"))
+    root = os.path.join(base, "vizmo")
+    total = 0
+    for dirpath, _, files in os.walk(root):
+        for f in files:
+            try:
+                total += os.path.getsize(os.path.join(dirpath, f))
+            except OSError:
+                pass
+    return total / 1e6
+
+
+class ProfilerOverlay(Panel):
+    """F10 GPU/CPU frame-time bar chart (Item 4).
+
+    Rows: one per pass with a bar scaled to the slowest pass and the
+    ms value right-aligned; total frame time on top. Fed by GPU
+    timestamp queries when the device supports them, else the
+    renderer's CPU-side pass timings (labelled accordingly).
+    """
+
+    BAR_W = 200
+
+    def __init__(self):
+        super().__init__(STATUS_STYLE)
+        self.enabled = False
+        self.style = PanelStyle(**{**STATUS_STYLE.__dict__,
+                                   "position": "center-left"})
+        self._font = self._font  # keep base font
+        self._last_key = None
+
+    def update(self, pass_times, total_ms, gpu_timed):
+        if not self.enabled:
+            return
+        items = tuple(sorted((k, round(v, 2))
+                             for k, v in pass_times.items()))
+        key = (items, round(total_ms, 1), gpu_timed,
+               self._fb_width, self._fb_height)
+        if key == self._last_key and self._tex is not None:
+            return
+        self._last_key = key
+
+        s = self.style
+        M, LH = s.margin, s.line_height
+        rows = sorted(pass_times.items(), key=lambda kv: -kv[1])
+        tw = self.BAR_W + 150
+        th = LH * (len(rows) + 2) + M * 2
+        img = Image.new("RGBA", (tw, th), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(img)
+        _rounded(draw, [(0, 0), (tw - 1, th - 1)], s.radius,
+                 fill=s.bg_color, outline=(255, 255, 255, 26))
+        src_lbl = "GPU timestamps" if gpu_timed else "CPU-timed"
+        draw.text((M, M), f"frame {total_ms:.1f} ms  ({src_lbl})",
+                  fill=s.accent_color, font=self._font)
+        y = M + LH
+        vmax = max([v for _, v in rows] + [1e-6])
+        for name, v in rows:
+            draw.text((M, y), name, fill=s.text_color, font=self._font)
+            bx0 = M + 80
+            bw = int(self.BAR_W * v / vmax)
+            _rounded(draw, [(bx0, y + 4), (bx0 + max(bw, 2), y + LH - 6)],
+                     4, fill=(61, 126, 255, 220))
+            txt = f"{v:.2f} ms"
+            bb = draw.textbbox((0, 0), txt, font=self._font)
+            draw.text((tw - M - (bb[2] - bb[0]), y), txt,
+                      fill=s.text_color, font=self._font)
+            y += LH
+        self._panel_w, self._panel_h = tw, th
+        self._panel_x, self._panel_y = self._panel_origin(tw, th)
+        self._upload_panel(tw, th, img.tobytes())
+
+    def render(self):
+        if not self.enabled:
+            return
+        super().render()
+
+
 class SightlinesOverlay(Panel):
     """Projected absorption sightlines drawn as labelled 2D segments.
 

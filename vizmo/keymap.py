@@ -40,6 +40,7 @@ KEYBINDINGS = [
     ("M", "Aperture mode: click=center, scroll=size, M again=set"),
     ("Shift+M", "Clear aperture (analysis back to global scope)"),
     ("F9", "Toggle science chrome (scale bar, status bar, axes)"),
+    ("F10", "Toggle GPU frame-time profiler overlay"),
     ("1-9", "Fly to camera bookmark (eased)"),
     ("Shift+1-9", "Save camera bookmark"),
     ("N / Shift+N", "Look at view center / fly toward it"),

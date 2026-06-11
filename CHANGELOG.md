@@ -13,10 +13,19 @@
   load_status markers and get_field_async()/field_ready() per-field
   background futures (2-worker pool).
 
-### Not included (deferred)
-- Non-blocking startup with loading screen, renderer GPU-buffer
-  bypass for derived fields, GPU timestamp profiling overlay (F10),
-  memory overlay, spectro/analysis rewiring onto fast_ops.
+### Completed in follow-up (same day)
+- F10 GPU profiling overlay: timestamp queries on the accum + resolve
+  passes (timestamp-query feature, EMA smoothing, 1 Hz readback) with
+  a CPU-timed fallback bar chart when unsupported.
+- Dev-overlay memory section (\\ key): tracemalloc heap peak, GPU
+  buffer bytes (registry scan), per-type particle counts, hsml cache
+  directory size.
+- spectro + analysis hot paths rewired onto fast_ops (numba) with the
+  numpy fallbacks intact.
+
+### Still deferred
+- Non-blocking startup with loading screen; renderer GPU-buffer
+  bypass for derived fields.
 
 ## 0.7.0 — 2026-06-10
 

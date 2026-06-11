@@ -169,6 +169,7 @@ def run_wgpu_app(
 
     # Renderer
     renderer = WGPURenderer(device, canvas_context, present_format)
+    renderer.init_gpu_timing()
     renderer._viewport_width = width  # use window size for LOD, not retina framebuffer size
     if getattr(data, "is_structured_grid", False):
         # Hsml from these readers is cbrt(cell_volume) — i.e. the cell's
@@ -253,6 +254,12 @@ def run_wgpu_app(
     )
     from .physics import UnitSystem
 
+    import tracemalloc
+
+    tracemalloc.start()
+    from .wgpu_overlay import WGPUProfilerOverlay
+
+    profiler_panel = WGPUProfilerOverlay(device, present_format)
     overlay = WGPUDevOverlay(device, present_format)
     sink_panel = WGPUSinkOverlay(device, present_format)
     sink_panel.enabled = data.n_stars > 0
@@ -674,6 +681,7 @@ def run_wgpu_app(
             f"Aperture set: {shape_name}, R={r_kpc:.0f} kpc, "
             f"center={mode_name}", "ok")
     _timings = {"cull": 0, "upload": 0, "render": 0}
+    _mem_stats = None
     _last_message = ""
     _render_mode = RenderMode.surface_density("Masses")
     _cmap_idx = AVAILABLE_COLORMAPS.index(start_cmap) if start_cmap in AVAILABLE_COLORMAPS else 0
@@ -1080,6 +1088,11 @@ def run_wgpu_app(
                     toasts.show("Split screen off")
             elif key == glfw.KEY_R and (mods & glfw.MOD_CONTROL):
                 drawer.toggle("regions")
+            elif key == glfw.KEY_F10:
+                profiler_panel.enabled = not profiler_panel.enabled
+                toasts.show(
+                    f"GPU profiler "
+                    f"{'on' if profiler_panel.enabled else 'off'}")
             elif key == glfw.KEY_F9:
                 vis = not scale_bar.enabled
                 scale_bar.enabled = vis
@@ -2293,6 +2306,36 @@ def run_wgpu_app(
             fps_time = now
             n_vis = renderer.n_particles
             n_tot = renderer.n_total
+            # Once-per-second profiler + memory refresh (Items 4/5).
+            if profiler_panel.enabled:
+                gpu_times = renderer.read_gpu_timings()
+                gpu_ok = getattr(renderer, "_gpu_timing_ok", False)
+                times = dict(gpu_times) if gpu_ok and gpu_times else {
+                    "cull": _timings["cull"] * 1000,
+                    "upload": _timings["upload"] * 1000,
+                    "render": _timings["render"] * 1000,
+                }
+                profiler_panel.set_framebuffer_size(fb_w, fb_h)
+                profiler_panel.update(times, last_render_ms,
+                                      gpu_ok and bool(gpu_times))
+            if overlay.enabled:
+                from .science_panels import vizmo_cache_mb
+
+                cur, peak = tracemalloc.get_traced_memory()
+                gpu_mb = (gpu_compute.gpu_buffer_bytes() / 1e6
+                          if gpu_compute is not None else 0.0)
+                by_type = "  ".join(
+                    f"{p_}:{(sl.stop - sl.start) / 1e6:.1f}M"
+                    for p_, sl in sorted(
+                        getattr(data, "_type_slices", {}).items()))
+                _mem_stats = {
+                    "py heap peak": f"{peak / 1e6:,.0f} MB",
+                    "gpu buffers": f"{gpu_mb:,.0f} MB",
+                    "hsml cache": f"{vizmo_cache_mb():,.0f} MB",
+                    "particles": by_type or "-",
+                }
+            else:
+                _mem_stats = None
             init_msg = " | Initializing GPU..." if gpu_compute is None else ""
             rec_msg = f" | REC {_recording['frame']}" if _recording["dir"] is not None else ""
             snap_name = os.path.basename(snapshot_path)
@@ -2943,6 +2986,7 @@ def run_wgpu_app(
                         _timings,
                         overlay_message,
                         smooth_fps=smooth_fps_val,
+                        mem=_mem_stats,
                     )
                     overlay.enabled = was_enabled
                 if sink_panel.enabled:
@@ -3036,6 +3080,8 @@ def run_wgpu_app(
                     drawer.render_to_pass(rpass)
                 if help_panel.enabled:
                     help_panel.render_to_pass(rpass)
+                if profiler_panel.enabled:
+                    profiler_panel.render_to_pass(rpass)
                 toasts.render_to_pass(rpass)
                 rpass.end()
             except Exception:
