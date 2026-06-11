@@ -260,6 +260,17 @@ def run_wgpu_app(
     from .wgpu_overlay import WGPUProfilerOverlay
 
     profiler_panel = WGPUProfilerOverlay(device, present_format)
+    from .overlay import build_default_menus
+    from .recentfiles import RecentFiles
+    from .wgpu_overlay import (WGPUMenuBar, WGPUColormapBrowser,
+                               WGPUFieldPicker)
+
+    _recents = RecentFiles()
+    _recents.add(snapshot_path)
+    menubar = WGPUMenuBar(device, present_format,
+                          build_default_menus(_recents.get()))
+    cmap_browser = WGPUColormapBrowser(device, present_format)
+    field_picker = WGPUFieldPicker(device, present_format)
     overlay = WGPUDevOverlay(device, present_format)
     sink_panel = WGPUSinkOverlay(device, present_format)
     sink_panel.enabled = data.n_stars > 0
@@ -798,6 +809,10 @@ def run_wgpu_app(
         if sink_panel.on_key(key, action):
             ui_dirty = True
             return
+        if (action == glfw.PRESS and key == glfw.KEY_BACKSPACE
+                and field_picker.on_backspace()):
+            ui_dirty = True
+            return
         # Any other PRESS may mutate scene state (R, L, ',', '.', mode
         # toggles, etc.), so force a full re-render.
         if action == glfw.PRESS:
@@ -806,7 +821,13 @@ def run_wgpu_app(
             if key == glfw.KEY_ESCAPE:
                 # Esc cancels aperture placement, then closes panels;
                 # quits only when nothing is in the way.
-                if _slice["active"]:
+                if menubar.on_escape():
+                    pass
+                elif cmap_browser.enabled:
+                    cmap_browser.enabled = False
+                elif field_picker.enabled:
+                    field_picker.enabled = False
+                elif _slice["active"]:
                     _slice["active"] = False
                     if drawer.mode == "slice":
                         drawer.enabled = False
@@ -1088,6 +1109,10 @@ def run_wgpu_app(
                     toasts.show("Split screen off")
             elif key == glfw.KEY_R and (mods & glfw.MOD_CONTROL):
                 drawer.toggle("regions")
+            elif key == glfw.KEY_O and (mods & glfw.MOD_CONTROL):
+                _dispatch_menu_action("open_file")
+            elif key == glfw.KEY_Q and (mods & glfw.MOD_CONTROL):
+                _dispatch_menu_action("quit")
             elif key == glfw.KEY_F10:
                 profiler_panel.enabled = not profiler_panel.enabled
                 toasts.show(
@@ -1331,6 +1356,35 @@ def run_wgpu_app(
         idle_streak = 0
         if button == glfw.MOUSE_BUTTON_LEFT and action == glfw.PRESS:
             x, y = _cursor_to_fb(win)
+            mb_action = menubar.on_click(x, y)
+            if mb_action:
+                if mb_action is not True:
+                    _dispatch_menu_action(mb_action)
+                return
+            cb_action = cmap_browser.on_click(x, y)
+            if cb_action:
+                if (isinstance(cb_action, tuple)
+                        and cb_action[0] == "apply_cmap"):
+                    try:
+                        from .colormaps import (
+                            colormap_to_texture_data as _ctd)
+
+                        renderer.set_colormap(_ctd(cb_action[1]))
+                        if cb_action[1] in AVAILABLE_COLORMAPS:
+                            _state["_cmap_idx"] = AVAILABLE_COLORMAPS.index(
+                                cb_action[1])
+                        toasts.show(f"Colormap: {cb_action[1]}", "ok")
+                    except Exception as e:
+                        toasts.show(f"Colormap failed: {e}", "error")
+                return
+            fp_action = field_picker.on_click(x, y)
+            if fp_action:
+                if (isinstance(fp_action, tuple)
+                        and fp_action[0] == "pick_field"):
+                    _state[field_picker.target] = fp_action[1]
+                    app_proxy._apply_render_mode()
+                    toasts.show(f"Field: {fp_action[1]}", "ok")
+                return
             if help_panel.enabled and help_panel.on_click(x, y):
                 return
             shift_held = (
@@ -1737,6 +1791,8 @@ def run_wgpu_app(
         # Text-field editing only mutates UI state — no scene re-render.
         ui_dirty = True
         idle_streak = 0
+        if field_picker.enabled and field_picker.on_char(chr(codepoint)):
+            return
         user_menu.on_char(codepoint, app_proxy)
         sink_panel.on_char(codepoint)
 
@@ -2235,6 +2291,107 @@ def run_wgpu_app(
                 toasts.show("Nothing to export yet", "warn")
         except Exception as e:
             toasts.show(f"Export failed: {e}", "error")
+
+    def _dispatch_menu_action(action):
+        """Map MenuBar action strings onto the existing handlers."""
+        import os as _os
+
+        if isinstance(action, tuple):
+            kind = action[0]
+            if kind == "mode":
+                _state["_render_mode_name"] = action[1]
+                app_proxy._apply_render_mode()
+            elif kind == "drawer":
+                drawer.toggle(action[1])
+            elif kind == "open_recent":
+                toasts.show(
+                    "Restart with this path to load: "
+                    + _os.path.basename(action[1]), "info", duration=6.0)
+            return
+        if action == "open_file":
+            try:
+                import tkinter as tk
+                from tkinter import filedialog
+
+                root = tk.Tk()
+                root.withdraw()
+                sel = filedialog.askopenfilename(
+                    title="Open snapshot",
+                    filetypes=[("HDF5 snapshots", "*.hdf5 *.h5"),
+                               ("All files", "*")])
+                root.destroy()
+                if sel:
+                    _recents.add(sel)
+                    toasts.show(
+                        "Restart with this path to load: "
+                        + _os.path.basename(sel), "info", duration=6.0)
+            except Exception as e:
+                toasts.show(f"Open failed: {e}", "error")
+        elif action == "quit":
+            glfw.set_window_should_close(window, True)
+        elif action == "screenshot":
+            _take_screenshot()
+        elif action == "publication":
+            _export_publication()
+        elif action == "export_region":
+            _export_region_cutout()
+        elif action == "fits_map":
+            _export_fits_map()
+        elif action == "export_vtk":
+            try:
+                from .export import export_vtk
+                from .physics import UnitSystem as _US
+
+                fields = {"Masses": data.masses}
+                out = _os.path.join(screenshot_dir or ".",
+                                    f"vizmo_{int(time.time())}.vtu")
+                export_vtk(data.positions * units.length_to_kpc,
+                           fields, out,
+                           aperture_region=drawer._active_region())
+                toasts.show(f"VTU: {_os.path.basename(out)}", "ok")
+            except Exception as e:
+                toasts.show(f"VTU failed: {e}", "error")
+        elif action == "stats_latex":
+            _handle_drawer_export("stats_latex")
+        elif action == "export_zip":
+            toasts.show("Use Ctrl+Shift+E for the ZIP bundle", "info")
+        elif action == "split":
+            toasts.show("Use Shift+S to cycle split modes", "info")
+        elif action == "slice":
+            toasts.show("Use Shift+Z to activate the slice plane",
+                        "info")
+        elif action in ("isosurface_open", "streamlines_open",
+                        "volume_open"):
+            drawer.toggle(action.replace("_open", ""))
+        elif action == "colormap_browser":
+            cmap_browser.enabled = not cmap_browser.enabled
+        elif action == "field_picker":
+            field_picker.set_fields(_sd_fields)
+            field_picker.search = ""
+            field_picker.enabled = not field_picker.enabled
+        elif action == "hide_ui":
+            pass  # Tab handles this; menu entry is documentation
+        elif action == "chrome":
+            scale_bar.enabled = not scale_bar.enabled
+            status_bar.enabled = scale_bar.enabled
+            gizmo.enabled = scale_bar.enabled
+        elif action == "dev_overlay":
+            overlay.enabled = not overlay.enabled
+        elif action == "profiler":
+            profiler_panel.enabled = not profiler_panel.enabled
+        elif action == "sightline_mode":
+            _sightlines["placing"] = True
+            toasts.show("Sightline mode: click two points")
+        elif action == "help":
+            help_panel.enabled = not help_panel.enabled
+        elif action == "about":
+            import platform
+
+            import wgpu as _wgpu
+
+            toasts.show(
+                f"vizmo 0.7.1 | py {platform.python_version()} | "
+                f"wgpu {_wgpu.__version__}", "info", duration=6.0)
 
     def _handle_filter_action(action):
         """Mutate data.filters from a drawer action and re-render.
@@ -2891,8 +3048,15 @@ def run_wgpu_app(
                 user_menu.set_framebuffer_size(fb_w, fb_h)
                 help_panel.set_framebuffer_size(fb_w, fb_h)
                 toolbar.set_framebuffer_size(fb_w, fb_h)
-                for p in (scale_bar, status_bar, toasts, gizmo, drawer):
+                for p in (scale_bar, status_bar, toasts, gizmo, drawer,
+                          menubar, cmap_browser, field_picker):
                     p.set_framebuffer_size(fb_w, fb_h)
+                menubar.update()
+                if cmap_browser.enabled:
+                    cmap_browser.update()
+                if field_picker.enabled:
+                    field_picker.set_fields(_sd_fields)
+                    field_picker.update()
                 toolbar.update(
                     recording=_recording["dir"] is not None,
                     orbiting=camera.orbit is not None,
@@ -3082,6 +3246,11 @@ def run_wgpu_app(
                     help_panel.render_to_pass(rpass)
                 if profiler_panel.enabled:
                     profiler_panel.render_to_pass(rpass)
+                menubar.render_to_pass(rpass)
+                if cmap_browser.enabled:
+                    cmap_browser.render_to_pass(rpass)
+                if field_picker.enabled:
+                    field_picker.render_to_pass(rpass)
                 toasts.render_to_pass(rpass)
                 rpass.end()
             except Exception:

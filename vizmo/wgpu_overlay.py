@@ -9,7 +9,8 @@ import numpy as np
 import wgpu
 from pathlib import Path
 
-from .overlay import DevOverlay, SinkOverlay, UserMenu, HelpOverlay, ToolbarOverlay
+from .overlay import (DevOverlay, SinkOverlay, UserMenu, HelpOverlay,
+                      ToolbarOverlay, MenuBar)
 from .science_panels import (
     ScaleBar,
     StatusBar,
@@ -19,6 +20,8 @@ from .science_panels import (
     ApertureOverlay,
     SightlinesOverlay,
     ProfilerOverlay,
+    ColormapBrowserPanel,
+    FieldPickerPanel,
 )
 
 SHADER_DIR = Path(__file__).parent / "shaders"
@@ -286,3 +289,21 @@ class WGPUUserMenu(_WGPUPanelMixin, UserMenu):
         self._wgpu_backend.render(render_pass)
         if self.show_colorbar:
             self._cbar_backend.render(render_pass)
+
+
+class WGPUMenuBar(_WGPUPanelMixin, MenuBar):
+    def __init__(self, device, present_format, menus=None):
+        MenuBar.__init__(self, menus)
+        self._init_wgpu(device, present_format)
+
+
+class WGPUColormapBrowser(_WGPUPanelMixin, ColormapBrowserPanel):
+    def __init__(self, device, present_format):
+        ColormapBrowserPanel.__init__(self)
+        self._init_wgpu(device, present_format)
+
+
+class WGPUFieldPicker(_WGPUPanelMixin, FieldPickerPanel):
+    def __init__(self, device, present_format):
+        FieldPickerPanel.__init__(self)
+        self._init_wgpu(device, present_format)

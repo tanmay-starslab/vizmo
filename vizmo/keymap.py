@@ -55,5 +55,6 @@ KEYBINDINGS = [
     ("Tab", "Hide / show all UI"),
     ("F1 or H", "Toggle this help"),
     ("Left / Right", "Previous / next snapshot (--series)"),
+    ("Ctrl+O / Ctrl+Q", "Open file dialog / quit"),
     ("Esc", "Quit"),
 ]

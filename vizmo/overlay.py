@@ -1446,3 +1446,303 @@ class UserMenu(Panel):
 
     # render() / release() come from Panel; the wgpu mixin overrides
     # render to draw the optional colorbar quad alongside the panel.
+
+
+# ---------------------------------------------------------------------------
+# Menu bar (Section 6.D)
+# ---------------------------------------------------------------------------
+
+class MenuItem:
+    """One row of a dropdown menu."""
+
+    def __init__(self, label="", shortcut="", action=None,
+                 separator=False, submenu=None):
+        self.label = label
+        self.shortcut = shortcut
+        self.action = action          # action string dispatched by the app
+        self.separator = separator
+        self.submenu = submenu        # list[MenuItem] | None
+
+
+def _sep():
+    return MenuItem(separator=True)
+
+
+def build_default_menus(recent_paths=()):
+    """The five standard menus as pure data. The app maps each item's
+    action string onto its existing handlers."""
+    export_items = [
+        MenuItem("Screenshot", "P", "screenshot"),
+        MenuItem("Publication Figure", "Ctrl+P", "publication"),
+        MenuItem("HDF5 Cutout", "Ctrl+E", "export_region"),
+        MenuItem("FITS Map", "Ctrl+M", "fits_map"),
+        MenuItem("VTK File", "", "export_vtk"),
+        MenuItem("LaTeX Table", "", "stats_latex"),
+        MenuItem("All Data (ZIP)", "Ctrl+Shift+E", "export_zip"),
+    ]
+    recents = [MenuItem(("..." + p[-34:]) if len(p) > 34 else p, "",
+                        ("open_recent", p))
+               for p in recent_paths] or [MenuItem("(empty)", "", None)]
+    return {
+        "File": [
+            MenuItem("Open...", "Ctrl+O", "open_file"),
+            MenuItem("Open Recent", "", submenu=recents),
+            _sep(),
+            MenuItem("Export", "", submenu=list(export_items)),
+            _sep(),
+            MenuItem("Quit", "Ctrl+Q", "quit"),
+        ],
+        "View": [
+            MenuItem("Render Mode", "", submenu=[
+                MenuItem("Surface Density", "", ("mode", "SurfaceDensity")),
+                MenuItem("Weighted Average", "", ("mode", "WeightedAverage")),
+                MenuItem("Weighted Variance", "", ("mode", "WeightedVariance")),
+                MenuItem("Composite", "", ("mode", "Composite")),
+                MenuItem("Slice Plane", "Shift+Z", "slice"),
+                MenuItem("Isosurface", "Shift+I", "isosurface_open"),
+                MenuItem("Streamlines", "Shift+V", "streamlines_open"),
+                MenuItem("Volume", "Shift+W", "volume_open"),
+            ]),
+            _sep(),
+            MenuItem("Split Screen", "Shift+S", "split"),
+            _sep(),
+            MenuItem("Colormap Browser", "", "colormap_browser"),
+            MenuItem("Field Picker", "", "field_picker"),
+            _sep(),
+            MenuItem("Hide All UI", "Tab", "hide_ui"),
+            MenuItem("Science Chrome", "F9", "chrome"),
+            MenuItem("Dev Overlay", "\\", "dev_overlay"),
+            MenuItem("GPU Profiling", "F10", "profiler"),
+        ],
+        "Analysis": [
+            MenuItem("Inspector", "I", ("drawer", "inspector")),
+            MenuItem("Phase Diagram", "G", ("drawer", "phase")),
+            MenuItem("Radial Profile", "J", ("drawer", "profile")),
+            MenuItem("Region Statistics", "U", ("drawer", "stats")),
+            MenuItem("Power Spectrum", "Shift+K", ("drawer", "spectrum")),
+            MenuItem("Orbit Integration", "O", ("drawer", "orbit")),
+            MenuItem("Sightlines", "Shift+A", "sightline_mode"),
+            MenuItem("Sightline List", "", ("drawer", "sightline")),
+            MenuItem("Regions", "Ctrl+R", ("drawer", "regions")),
+            MenuItem("Field Filters", "F", ("drawer", "filters")),
+        ],
+        "Export": list(export_items),
+        "Help": [
+            MenuItem("Help Browser", "F1", "help"),
+            MenuItem("Keyboard Shortcuts", "", "help"),
+            MenuItem("About", "", "about"),
+        ],
+    }
+
+
+MENUBAR_STYLE = PanelStyle(
+    font_size=15, line_height=26, margin=10, min_width=10,
+    bg_color=(19, 24, 31, 235),       # DarkTheme.BG_SURFACE
+    text_color=(232, 237, 243, 255),  # DarkTheme.TEXT_PRIMARY
+    accent_color=(61, 126, 255, 255),  # DarkTheme.ACCENT
+    toggle_on_color=(61, 126, 255, 255),
+    toggle_off_color=(138, 150, 166, 255),
+    dropdown_bg=(26, 33, 42, 255),    # DarkTheme.BG_RAISED
+    dropdown_hover=(30, 63, 127, 255),
+    slider_btn=(26, 33, 42, 255),
+    position="top-left",
+    font_family="sans-serif",
+    radius=0,
+)
+
+
+class MenuBar(Panel):
+    """Top menu bar + dropdown rendering and hit-testing.
+
+    State machine: closed -> menu open (index) -> submenu open
+    (index, row). on_click returns the activated item's action (str or
+    tuple) for the app to dispatch, True when the click was consumed
+    by the bar/menu chrome, or False when it missed entirely (the
+    caller should close on miss). Escape closes via on_escape().
+    """
+
+    HEIGHT = 26
+
+    def __init__(self, menus=None):
+        super().__init__(MENUBAR_STYLE)
+        self.enabled = True
+        self.menus = menus or build_default_menus()
+        self.open_menu = None       # menu name or None
+        self.open_submenu = None    # row index whose submenu is open
+        self._title_zones = []      # (x0, x1, name)
+        self._row_zones = []        # (y0, y1, item, in_submenu)
+        self._dd_origin = (0, 0)
+        self._sub_origin = (0, 0)
+
+    def get_menu(self, name):
+        return self.menus.get(name, [])
+
+    def on_escape(self):
+        if self.open_menu is not None:
+            self.open_menu = None
+            self.open_submenu = None
+            self._last_items_key = None
+            return True
+        return False
+
+    # -- drawing ------------------------------------------------------------
+
+    def update(self):
+        if not self.enabled:
+            return
+        fb_w = max(self._fb_width, 4)
+        s = self.style
+        bar_h = int(self.HEIGHT * max(self._dpi_scale, 1.0))
+        names = list(self.menus.keys())
+        key = (tuple(names), self.open_menu, self.open_submenu,
+               fb_w, self._fb_height)
+        if key == self._last_items_key and self._tex is not None:
+            return
+        self._last_items_key = key
+
+        # Measure dropdown if open.
+        dd_items = self.menus.get(self.open_menu, []) if self.open_menu else []
+        dummy = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
+        row_h = s.line_height
+        dd_w = 0
+        for it in dd_items:
+            if it.separator:
+                continue
+            bb = dummy.textbbox((0, 0), it.label, font=self._font)
+            sc = dummy.textbbox((0, 0), it.shortcut or "", font=self._font)
+            w = (bb[2] - bb[0]) + (sc[2] - sc[0]) + 70
+            dd_w = max(dd_w, w)
+        dd_h = sum(8 if it.separator else row_h for it in dd_items) + 8
+
+        sub_items = []
+        if (self.open_menu and self.open_submenu is not None
+                and 0 <= self.open_submenu < len(dd_items)
+                and dd_items[self.open_submenu].submenu):
+            sub_items = dd_items[self.open_submenu].submenu
+        sub_w = 0
+        for it in sub_items:
+            bb = dummy.textbbox((0, 0), it.label, font=self._font)
+            sc = dummy.textbbox((0, 0), it.shortcut or "", font=self._font)
+            sub_w = max(sub_w, (bb[2] - bb[0]) + (sc[2] - sc[0]) + 70)
+        sub_h = sum(8 if it.separator else row_h for it in sub_items) + 8
+
+        th = bar_h + (dd_h if dd_items else 0) + max(sub_h - dd_h, 0) + 4
+        tw = fb_w
+        img = Image.new("RGBA", (tw, th), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(img)
+        # Bar background + 1px bottom border (DarkTheme.BORDER).
+        draw.rectangle([(0, 0), (tw, bar_h - 1)], fill=s.bg_color)
+        draw.rectangle([(0, bar_h - 1), (tw, bar_h)],
+                       fill=(30, 39, 48, 255))
+
+        self._title_zones = []
+        x = s.margin
+        for name in names:
+            bb = dummy.textbbox((0, 0), name, font=self._font)
+            w = bb[2] - bb[0] + 2 * s.margin
+            if name == self.open_menu:
+                draw.rectangle([(x - 4, 2), (x + w - s.margin, bar_h - 3)],
+                               fill=(30, 63, 127, 255))
+            draw.text((x, (bar_h - s.font_size) // 2 - 2), name,
+                      fill=s.text_color, font=self._font)
+            self._title_zones.append((x - 4, x + w - s.margin, name))
+            x += w + 4
+
+        # Dropdown.
+        self._row_zones = []
+        if dd_items:
+            zone = self._title_zones[names.index(self.open_menu)]
+            dx = min(zone[0], tw - dd_w - 6)
+            dy = bar_h + 2
+            self._dd_origin = (dx, dy)
+            draw.rounded_rectangle([dx, dy, dx + dd_w, dy + dd_h],
+                                   radius=6, fill=s.dropdown_bg,
+                                   outline=(30, 39, 48, 255))
+            yy = dy + 4
+            for i, it in enumerate(dd_items):
+                if it.separator:
+                    draw.line([(dx + 8, yy + 3), (dx + dd_w - 8, yy + 3)],
+                              fill=(30, 39, 48, 255), width=1)
+                    yy += 8
+                    continue
+                if i == self.open_submenu:
+                    draw.rectangle([(dx + 2, yy), (dx + dd_w - 2, yy + row_h)],
+                                   fill=(30, 63, 127, 255))
+                draw.text((dx + 10, yy + 2), it.label, fill=s.text_color,
+                          font=self._font)
+                tail = "▶" if it.submenu else (it.shortcut or "")
+                if tail:
+                    bb = dummy.textbbox((0, 0), tail, font=self._font)
+                    draw.text((dx + dd_w - 10 - (bb[2] - bb[0]), yy + 2),
+                              tail, fill=(138, 150, 166, 255),
+                              font=self._font)
+                self._row_zones.append((yy, yy + row_h, i, it, False))
+                yy += row_h
+
+            if sub_items:
+                row_y = next(z[0] for z in self._row_zones
+                             if z[2] == self.open_submenu)
+                sx = min(dx + dd_w + 2, tw - sub_w - 4)
+                sy = min(row_y, th - sub_h - 2)
+                self._sub_origin = (sx, sy)
+                draw.rounded_rectangle([sx, sy, sx + sub_w, sy + sub_h],
+                                       radius=6, fill=s.dropdown_bg,
+                                       outline=(30, 39, 48, 255))
+                yy = sy + 4
+                for it in sub_items:
+                    if it.separator:
+                        yy += 8
+                        continue
+                    draw.text((sx + 10, yy + 2), it.label,
+                              fill=s.text_color, font=self._font)
+                    if it.shortcut:
+                        bb = dummy.textbbox((0, 0), it.shortcut,
+                                            font=self._font)
+                        draw.text((sx + sub_w - 10 - (bb[2] - bb[0]),
+                                   yy + 2), it.shortcut,
+                                  fill=(138, 150, 166, 255),
+                                  font=self._font)
+                    self._row_zones.append((yy, yy + row_h, -1, it, True))
+                    yy += row_h
+
+        self._bar_h = bar_h
+        self._panel_w, self._panel_h = tw, th
+        self._panel_x, self._panel_y = 0, 0
+        self._upload_panel(tw, th, img.tobytes())
+
+    # -- interaction --------------------------------------------------------
+
+    def on_click(self, x, y):
+        if not self.enabled:
+            return False
+        bar_h = getattr(self, "_bar_h", self.HEIGHT)
+        if y < bar_h:
+            for x0, x1, name in self._title_zones:
+                if x0 <= x <= x1:
+                    self.open_menu = (None if self.open_menu == name
+                                      else name)
+                    self.open_submenu = None
+                    self._last_items_key = None
+                    return True
+            return self.open_menu is not None and self._close()
+        if self.open_menu is None:
+            return False
+        for y0, y1, idx, it, in_sub in self._row_zones:
+            ox = self._sub_origin[0] if in_sub else self._dd_origin[0]
+            # x bound check against the owning dropdown panel
+            if y0 <= y <= y1 and x >= ox - 4:
+                if it.submenu and not in_sub:
+                    self.open_submenu = idx
+                    self._last_items_key = None
+                    return True
+                if it.action is None:
+                    return True
+                self._close()
+                return it.action
+        return self._close()
+
+    def _close(self):
+        self.open_menu = None
+        self.open_submenu = None
+        self._last_items_key = None
+        return True

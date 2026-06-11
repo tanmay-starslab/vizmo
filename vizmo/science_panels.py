@@ -1545,3 +1545,334 @@ class AnalysisDrawer(Panel):
         if not self.enabled:
             return
         super().render()
+
+
+# ---------------------------------------------------------------------------
+# Colormap browser (Section 6.G) + visual field picker (Section 6.F)
+# ---------------------------------------------------------------------------
+
+CMAP_CATEGORIES = {
+    "Perceptual": ["viridis", "plasma", "inferno", "magma", "cividis",
+                   "cmr.rainforest", "cmr.ember", "cmr.cosmic"],
+    "Diverging": ["RdBu_r", "coolwarm", "bwr", "seismic",
+                  "cmr.fusion", "cmr.iceburn", "cmr.redshift"],
+    "Sequential": ["Blues", "Reds", "Greens", "YlOrRd", "hot",
+                   "cmr.freeze", "cmr.sunburst"],
+    "Cyclic": ["hsv", "twilight", "twilight_shifted"],
+    "CMasher": [],  # filled lazily from the cmasher module
+}
+
+
+def _cmasher_names():
+    try:
+        import cmasher
+
+        return [f"cmr.{m}" for m in cmasher.cm.cmap_d
+                if not m.endswith("_r")]
+    except Exception:
+        return []
+
+
+class ColormapBrowserPanel(Panel):
+    """Tabbed colormap browser: gradient swatches per category,
+    Reversed toggle, click applies immediately (the app handles the
+    returned ('apply_cmap', name) action)."""
+
+    COLS = 3
+    SW_W, SW_H = 100, 12
+
+    def __init__(self):
+        super().__init__(DRAWER_STYLE)
+        self.enabled = False
+        self.tab = "Perceptual"
+        self.reversed = False
+        self.active_cmap = "magma"
+        self._buttons = []
+        self._last_key = None
+        if not CMAP_CATEGORIES["CMasher"]:
+            CMAP_CATEGORIES["CMasher"] = _cmasher_names()[:24]
+
+    def names_for_tab(self, tab=None):
+        names = list(CMAP_CATEGORIES.get(tab or self.tab, []))
+        if self.reversed:
+            # Toggle the _r suffix rather than stacking it (RdBu_r's
+            # reverse is RdBu, not the invalid RdBu_r_r).
+            names = [n[:-2] if n.endswith("_r") else n + "_r"
+                     for n in names]
+        return names
+
+    def _swatch(self, name):
+        import matplotlib
+
+        try:
+            cmap = matplotlib.colormaps[name]
+        except KeyError:
+            return None
+        x = np.linspace(0, 1, self.SW_W)
+        rgba = (np.asarray(cmap(x)) * 255).astype(np.uint8)
+        return np.repeat(rgba[None, :, :], self.SW_H, axis=0)
+
+    def update(self, _data=None):
+        if not self.enabled:
+            return
+        s = self.style
+        M, LH = s.margin, s.line_height
+        names = self.names_for_tab()
+        key = (self.tab, self.reversed, self.active_cmap,
+               self._fb_width, self._fb_height)
+        if key == self._last_key and self._tex is not None:
+            return
+        self._last_key = key
+        self._buttons = []
+
+        cell_w = self.SW_W + 16
+        cell_h = self.SW_H + LH
+        rows = (len(names) + self.COLS - 1) // self.COLS
+        tw = max(self.COLS * cell_w + 2 * M, 380)
+        th = LH + 10 + LH + rows * cell_h + M * 2
+
+        img = Image.new("RGBA", (tw, th), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(img)
+        _rounded(draw, [(0, 0), (tw - 1, th - 1)], s.radius,
+                 fill=s.bg_color, outline=(255, 255, 255, 30))
+        draw.text((M, 6), "Colormaps", fill=s.accent_color,
+                  font=self._font)
+        cw = LH - 6
+        cx0 = tw - M - cw
+        _rounded(draw, [(cx0, 5), (cx0 + cw, 5 + cw)], 6,
+                 fill=(60, 34, 40, 255))
+        draw.line([(cx0 + 6, 11), (cx0 + cw - 6, cw - 1)],
+                  fill=(235, 160, 160, 255), width=2)
+        draw.line([(cx0 + cw - 6, 11), (cx0 + 6, cw - 1)],
+                  fill=(235, 160, 160, 255), width=2)
+        self._buttons.append((cx0, 5, cx0 + cw, 5 + cw, "close"))
+
+        # Tabs + reversed toggle
+        y = LH + 8
+        bx = M
+        dummy = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
+        for tab in CMAP_CATEGORIES:
+            bb = dummy.textbbox((0, 0), tab, font=self._font)
+            bw = bb[2] - bb[0] + 14
+            fill = ((30, 63, 127, 255) if tab == self.tab
+                    else s.slider_btn)
+            _rounded(draw, [(bx, y), (bx + bw, y + LH - 6)], 7,
+                     fill=fill)
+            draw.text((bx + 7, y - 2), tab, fill=s.text_color,
+                      font=self._font)
+            self._buttons.append((bx, y, bx + bw, y + LH - 6,
+                                  ("tab", tab)))
+            bx += bw + 5
+        lbl = "rev" if not self.reversed else "REV"
+        bb = dummy.textbbox((0, 0), lbl, font=self._font)
+        bw = bb[2] - bb[0] + 14
+        _rounded(draw, [(tw - M - bw, y), (tw - M, y + LH - 6)], 7,
+                 fill=((30, 63, 127, 255) if self.reversed
+                       else s.slider_btn))
+        draw.text((tw - M - bw + 7, y - 2), lbl, fill=s.text_color,
+                  font=self._font)
+        self._buttons.append((tw - M - bw, y, tw - M, y + LH - 6,
+                              "reverse"))
+        y += LH + 4
+
+        for i, name in enumerate(names):
+            col, row = i % self.COLS, i // self.COLS
+            x0 = M + col * cell_w
+            y0 = y + row * cell_h
+            sw = self._swatch(name)
+            if sw is not None:
+                img.paste(Image.fromarray(sw, "RGBA"), (x0, y0))
+            border = ((61, 126, 255, 255) if name == self.active_cmap
+                      else (255, 255, 255, 50))
+            draw.rectangle([(x0 - 1, y0 - 1),
+                            (x0 + self.SW_W, y0 + self.SW_H)],
+                           outline=border)
+            short = name if len(name) <= 16 else name[:15] + "…"
+            draw.text((x0, y0 + self.SW_H + 1), short,
+                      fill=(168, 174, 188, 255), font=self._font)
+            self._buttons.append((x0, y0, x0 + self.SW_W,
+                                  y0 + self.SW_H + LH,
+                                  ("apply_cmap", name)))
+
+        self._panel_w, self._panel_h = tw, th
+        self._panel_x, self._panel_y = self._panel_origin(tw, th)
+        self._upload_panel(tw, th, img.tobytes())
+
+    def on_click(self, x, y):
+        if not self.enabled:
+            return False
+        lx, ly = x - self._panel_x, y - self._panel_y
+        if not (0 <= lx <= self._panel_w and 0 <= ly <= self._panel_h):
+            return False
+        for x0, y0, x1, y1, action in self._buttons:
+            if x0 <= lx <= x1 and y0 <= ly <= y1:
+                if action == "close":
+                    self.enabled = False
+                    return True
+                if action == "reverse":
+                    self.reversed = not self.reversed
+                    self._last_key = None
+                    return True
+                if isinstance(action, tuple) and action[0] == "tab":
+                    self.tab = action[1]
+                    self._last_key = None
+                    return True
+                if isinstance(action, tuple) and action[0] == "apply_cmap":
+                    self.active_cmap = action[1]
+                    self._last_key = None
+                    return action
+                return True
+        return True
+
+    def render(self):
+        if not self.enabled:
+            return
+        super().render()
+
+
+FIELD_CATEGORIES = {
+    "HYDRO": ["Density", "Masses"],
+    "THERMAL": ["Temperature", "Pressure", "Entropy", "CoolingTime",
+                "FreeFallTime", "TcoolOverTff", "SoundSpeed"],
+    "KINEMATIC": ["VelocityMagnitude", "RadialVelocity",
+                  "SpecificAngularMomentum", "AngularMomentumZ",
+                  "MachNumber"],
+    "CHEMICAL": ["MetallicityZsun", "OxygenAbundance",
+                 "MagnesiumAbundance", "IronAbundance",
+                 "AlphaEnhancement"],
+    "MAGNETIC": ["MagneticFieldMagnitude", "AlfvenSpeed", "AlfvenMach",
+                 "PlasmaBeta"],
+    "STELLAR": ["StellarAge", "HIDensity", "JeansLength", "JeansMass"],
+}
+
+
+class FieldPickerPanel(Panel):
+    """Searchable, categorized field picker (Section 6.F).
+
+    The app feeds available fields via set_fields(); type-to-search
+    filters case-insensitively; clicking a row returns
+    ('pick_field', name) for the app to apply to the active dropdown
+    target. Recent picks persist for the session.
+    """
+
+    def __init__(self):
+        super().__init__(DRAWER_STYLE)
+        self.enabled = False
+        self.search = ""
+        self.target = "_sd_field"   # which app state key receives the pick
+        self.recent = []
+        self._fields = []
+        self._buttons = []
+        self._last_key = None
+
+    def set_fields(self, fields):
+        self._fields = list(fields)
+
+    def filtered(self):
+        """(category, [names]) honoring the search filter; RAW collects
+        fields not claimed by any category."""
+        q = self.search.lower()
+        claimed = set()
+        out = []
+        if self.recent and not q:
+            out.append(("RECENT", [f for f in self.recent
+                                   if f in self._fields][:6]))
+        for cat, names in FIELD_CATEGORIES.items():
+            hits = [n for n in names
+                    if n in self._fields and q in n.lower()]
+            claimed.update(names)
+            if hits:
+                out.append((cat, hits))
+        raw = [n for n in self._fields
+               if n not in claimed and q in n.lower()]
+        if raw:
+            out.append(("RAW", raw))
+        return out
+
+    def on_char(self, char):
+        if not self.enabled:
+            return False
+        self.search += char
+        self._last_key = None
+        return True
+
+    def on_backspace(self):
+        if self.enabled and self.search:
+            self.search = self.search[:-1]
+            self._last_key = None
+            return True
+        return False
+
+    def update(self, _data=None):
+        if not self.enabled:
+            return
+        s = self.style
+        M, LH = s.margin, s.line_height
+        groups = self.filtered()
+        key = (self.search, tuple((c, tuple(n)) for c, n in groups),
+               self._fb_width, self._fb_height)
+        if key == self._last_key and self._tex is not None:
+            return
+        self._last_key = key
+        self._buttons = []
+
+        n_rows = sum(1 + len(names) for _, names in groups)
+        tw = 360
+        th = min(LH * (n_rows + 2) + 3 * M, 720)
+        img = Image.new("RGBA", (tw, th), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(img)
+        _rounded(draw, [(0, 0), (tw - 1, th - 1)], s.radius,
+                 fill=s.bg_color, outline=(255, 255, 255, 30))
+        hint = self.search or "type to search..."
+        draw.text((M, 6), f"Field picker: {hint}",
+                  fill=s.accent_color, font=self._font)
+        cw = LH - 6
+        cx0 = tw - M - cw
+        _rounded(draw, [(cx0, 5), (cx0 + cw, 5 + cw)], 6,
+                 fill=(60, 34, 40, 255))
+        self._buttons.append((cx0, 5, cx0 + cw, 5 + cw, "close"))
+
+        y = LH + 8
+        for cat, names in groups:
+            if y > th - LH:
+                break
+            draw.text((M, y), cat, fill=(138, 150, 166, 255),
+                      font=self._font)
+            y += LH
+            for n in names:
+                if y > th - LH:
+                    break
+                draw.text((M + 16, y), n, fill=s.text_color,
+                          font=self._font)
+                self._buttons.append((M, y, tw - M, y + LH,
+                                      ("pick_field", n)))
+                y += LH
+
+        self._panel_w, self._panel_h = tw, th
+        self._panel_x, self._panel_y = self._panel_origin(tw, th)
+        self._upload_panel(tw, th, img.tobytes())
+
+    def on_click(self, x, y):
+        if not self.enabled:
+            return False
+        lx, ly = x - self._panel_x, y - self._panel_y
+        if not (0 <= lx <= self._panel_w and 0 <= ly <= self._panel_h):
+            return False
+        for x0, y0, x1, y1, action in self._buttons:
+            if x0 <= lx <= x1 and y0 <= ly <= y1:
+                if action == "close":
+                    self.enabled = False
+                    return True
+                if isinstance(action, tuple) and action[0] == "pick_field":
+                    name = action[1]
+                    self.recent = ([name] + [r for r in self.recent
+                                             if r != name])[:6]
+                    self.enabled = False
+                    return action
+                return True
+        return True
+
+    def render(self):
+        if not self.enabled:
+            return
+        super().render()
