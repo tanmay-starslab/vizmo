@@ -57,6 +57,10 @@ def run_wgpu_app(
     # --series: the positional path is a directory; discover the time
     # series and start from the first (highest-z) snapshot.
     _series = {"snaps": [], "index": 0, "pending": None}
+    # In-place snapshot swap queue: any code (series arrows, File >
+    # Open, Open Recent) may set a path here; the main loop performs
+    # the reload exactly as the series switcher does.
+    _pending_load = {"path": None, "label": ""}
     _split_snapshot_path = split_snapshot
     if series:
         from .series import discover_snapshots
@@ -2304,9 +2308,8 @@ def run_wgpu_app(
             elif kind == "drawer":
                 drawer.toggle(action[1])
             elif kind == "open_recent":
-                toasts.show(
-                    "Restart with this path to load: "
-                    + _os.path.basename(action[1]), "info", duration=6.0)
+                _pending_load["path"] = action[1]
+                _pending_load["label"] = _os.path.basename(action[1])
             return
         if action == "open_file":
             try:
@@ -2321,10 +2324,8 @@ def run_wgpu_app(
                                ("All files", "*")])
                 root.destroy()
                 if sel:
-                    _recents.add(sel)
-                    toasts.show(
-                        "Restart with this path to load: "
-                        + _os.path.basename(sel), "info", duration=6.0)
+                    _pending_load["path"] = sel
+                    _pending_load["label"] = _os.path.basename(sel)
             except Exception as e:
                 toasts.show(f"Open failed: {e}", "error")
         elif action == "quit":
@@ -2557,26 +2558,38 @@ def run_wgpu_app(
                     toasts.show(f"Picked particle {idx:,}", "ok")
                 dirty = True
 
-        # Snapshot-series navigation: load the queued snapshot, keep
-        # the camera's offset from the (re-tracked) center.
+        # Snapshot-series navigation queues a path like any other
+        # in-place load.
         if _series["pending"] is not None:
             new_i = _series["pending"]
             _series["pending"] = None
             info = _series["snaps"][new_i]
-            toasts.show(
-                f"Loading snapshot {info.snap_num} (z={info.redshift:.2f})...",
-                "info")
+            _pending_load["path"] = info.path
+            _pending_load["label"] = (
+                f"snapshot {info.snap_num} (z={info.redshift:.2f})")
+            _series["index"] = new_i
+
+        # In-place snapshot swap (series arrows, File > Open, recents).
+        if _pending_load["path"] is not None:
+            _new_path = _pending_load["path"]
+            _pending_load["path"] = None
+            toasts.show(f"Loading {_pending_load['label'] or _new_path}...",
+                        "info")
             try:
                 from .framing import find_center as _fc
 
                 old_center = data.get_view_center().copy()
                 cam_offset = camera.position - old_center
                 new_data = SnapshotData(
-                    info.path, particle_types=list(data.particle_types),
+                    _new_path, particle_types=list(data.particle_types),
                     hsml_progress=_hsml_progress)
                 data.close()
                 data = new_data
+                snapshot_path = _new_path
                 units = UnitSystem(data.header)
+                _recents.add(_new_path)
+                menubar.menus = build_default_menus(_recents.get())
+                menubar._last_items_key = None
                 try:
                     new_center = _fc(data, center_on or "densest")
                 except Exception:
@@ -2598,16 +2611,15 @@ def run_wgpu_app(
                 gpu_compute = None
                 _slot_sorted[0] = None
                 _slot_sorted[1] = None
-                _series["index"] = new_i
                 _sd_fields = data.available_fields_with_derived()
                 _state["_vector_fields"] = data.available_vector_fields()
                 drawer.refresh()
+                drawer.sightlines = _sightlines["list"]
                 needs_auto_range = True
                 dirty = True
                 toasts.show(
-                    f"Snapshot {new_i + 1}/{len(_series['snaps'])}  "
-                    f"z={info.redshift:.2f}  t={info.time_gyr:.2f} Gyr",
-                    "ok")
+                    f"Loaded {os.path.basename(_new_path)}: "
+                    f"{data.n_particles / 1e6:.1f}M particles", "ok")
             except Exception as e:
                 toasts.show(f"Snapshot load failed: {e}", "error",
                             duration=6.0)
