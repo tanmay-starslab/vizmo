@@ -3211,7 +3211,29 @@ def run_wgpu_app(
                     ptype_labels=data.ptype_labels,
                     fov=camera.fov,
                     cam_speed=camera.speed,
+                    ptype_counts={p_: sl.stop - sl.start
+                                  for p_, sl in getattr(
+                                      data, "_type_slices", {}).items()},
+                    perf=(f"{last_render_ms:.0f} ms | {fps:.0f} fps | "
+                          f"LOD {min(renderer.n_particles / max(renderer.n_total, 1), 1.0) * 100:.0f}%"),
                 )
+                # Render-mode icon row tool requests (SL/IS/ST/VL).
+                if user_menu.pending_tool:
+                    tool = user_menu.pending_tool
+                    user_menu.pending_tool = None
+                    if tool == "slice":
+                        if not _slice["active"]:
+                            _slice["active"] = True
+                            drawer.enabled = True
+                            drawer.mode = "slice"
+                            _recompute_slice()
+                    elif tool == "isosurface":
+                        drawer.toggle("isosurface")
+                        if (drawer.mode == "isosurface"
+                                and not _iso["surfaces"]):
+                            _iso_recompute(add_new=True)
+                    else:
+                        drawer.toggle(tool)
 
                 rpass = _frame_encoder.begin_render_pass(
                     color_attachments=[

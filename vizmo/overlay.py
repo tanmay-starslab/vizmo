@@ -542,6 +542,9 @@ class Panel:
             if key == "_toggle_minimize":
                 self._minimized = not self._minimized
                 return True
+            if isinstance(key, str) and key.startswith("_sec_"):
+                getattr(self, key)()
+                return True
         if wtype == "dropdown_header":
             key = widget[3]
             self._dropdown_open = None if self._dropdown_open == key else key
@@ -1078,6 +1081,8 @@ class HelpOverlay(Panel):
 class UserMenu(Panel):
     """Always-visible user menu with weight field, limits, scale, colorbar."""
 
+    SECTION_KEYS = ("types", "mode", "fields", "color", "lod")
+
     def __init__(self):
         super().__init__(USER_STYLE)
         self.show_colorbar = False
@@ -1085,6 +1090,41 @@ class UserMenu(Panel):
         self._edit_buffer = ""
         self._app_ref = None
         self._cbar_tex = None
+        # Left-sidebar sections (Item 3): open/closed state persisted
+        # in the session settings.
+        from .session import load_settings
+
+        saved = load_settings().get("sidebar_sections", {})
+        self.sections = {k: bool(saved.get(k, True))
+                         for k in self.SECTION_KEYS}
+        self.pending_tool = None  # render-mode icon row tool requests
+
+    def _toggle_section(self, key):
+        self.sections[key] = not self.sections[key]
+        self._last_items_key = None
+        try:
+            from .session import load_settings, save_settings
+
+            st = load_settings()
+            st["sidebar_sections"] = self.sections
+            save_settings(st)
+        except Exception:
+            pass
+
+    def _sec_types(self):
+        self._toggle_section("types")
+
+    def _sec_mode(self):
+        self._toggle_section("mode")
+
+    def _sec_fields(self):
+        self._toggle_section("fields")
+
+    def _sec_color(self):
+        self._toggle_section("color")
+
+    def _sec_lod(self):
+        self._toggle_section("lod")
 
     def on_key(self, key, action):
         import glfw
@@ -1206,7 +1246,7 @@ class UserMenu(Panel):
                composite_slots=None,
                available_ptypes=None, selected_ptypes=None,
                ptype_labels=None,
-               fov=None, cam_speed=None):
+               fov=None, cam_speed=None, **kwargs):
         self._SD_OPS = sd_ops or ["*"]
         if self._minimized:
             self.render_panel([("button", "[+] Splat", "_toggle_minimize")])
@@ -1221,17 +1261,43 @@ class UserMenu(Panel):
                 all_fields.append(vf)
         vprojs = vector_projections or ["LOS", "|v|", "|v|^2"]
 
-        if available_ptypes is not None:
+        ptype_counts = kwargs.get("ptype_counts") or {}
+
+        def _hdr(label, key):
+            caret = "v" if self.sections[key] else ">"
+            items.append(("button", f"{caret} {label}", f"_sec_{key}"))
+
+        _hdr("PARTICLE TYPES", "types")
+        if self.sections["types"] and available_ptypes is not None:
             items.append((
                 "ptype_row", "Types",
                 set(available_ptypes), set(selected_ptypes or set()),
                 "ptypes", dict(ptype_labels or {}),
             ))
+            for pt in sorted(selected_ptypes or []):
+                name = (ptype_labels or {}).get(pt, f"type {pt}")
+                n = ptype_counts.get(pt, 0)
+                items.append(("kv", f"  {pt} {name}",
+                              f"{n / 1e6:.1f}M" if n else "-"))
 
-        if render_modes and len(render_modes) > 1:
-            items.append(("dropdown", "Mode", render_mode_name, render_modes, "render_mode"))
+        _hdr("RENDER MODE", "mode")
+        if self.sections["mode"] and render_modes and len(render_modes) > 1:
+            short = {"SurfaceDensity": "SD", "WeightedAverage": "WA",
+                     "WeightedVariance": "WV", "Composite": "CO"}
+            items.append(("button_row", [
+                (short.get(m, m[:2]), ("set_mode", m),
+                 m == render_mode_name) for m in render_modes]))
+            items.append(("button_row", [
+                ("SL", ("tool", "slice")), ("IS", ("tool", "isosurface")),
+                ("ST", ("tool", "streamlines")),
+                ("VL", ("tool", "volume"))]))
 
-        if render_mode_name == "Composite" and composite_slots:
+        _hdr("FIELDS", "fields")
+
+        if not self.sections["fields"]:
+            composite_slots = None if render_mode_name != "Composite" else composite_slots
+        if (render_mode_name == "Composite" and composite_slots
+                and self.sections["fields"]):
             # Two stacked slot panels
             slot_modes = ["SurfaceDensity", "WeightedAverage", "WeightedVariance"]
             items.append(("text", "--- Lightness ---"))
@@ -1242,7 +1308,8 @@ class UserMenu(Panel):
             items.append(("toggle", "Colorbar", self.show_colorbar, "colorbar"))
         else:
             # Single-field mode
-            if all_fields and len(all_fields) > 1:
+            if (self.sections["fields"] and all_fields
+                    and len(all_fields) > 1):
                 items.append(("dropdown", "Weight", sd_field, all_fields, "sd_field"))
                 if render_mode_name == "SurfaceDensity":
                     items.append(("dropdown", "Op", sd_op, sd_ops or ["*"], "sd_op"))
@@ -1250,12 +1317,14 @@ class UserMenu(Panel):
                 else:
                     items.append(("dropdown", "Data", wa_data_field, all_fields, "wa_data_field"))
 
-            uses_vector = (sd_field in vf_set
+            _hdr("COLOR", "color")
+            uses_vector = self.sections["color"] and (sd_field in vf_set
                            or (render_mode_name == "SurfaceDensity" and sd_field2 in vf_set)
                            or (render_mode_name != "SurfaceDensity" and wa_data_field in vf_set))
             if uses_vector:
                 items.append(("dropdown", "Proj", vector_projection, vprojs, "vector_projection"))
-            items.append(("dropdown", "Cmap", cmap_name, colormaps, "colormap"))
+            if self.sections["color"]:
+                items.append(("dropdown", "Cmap", cmap_name, colormaps, "colormap"))
 
             if self._editing == "min":
                 lo_display = self._edit_buffer + "_"
@@ -1272,19 +1341,28 @@ class UserMenu(Panel):
                 hi_display = f"{renderer.qty_max:.3g}"
 
             prefix = "log " if renderer.log_scale else ""
-            items.append(("field", f"{prefix}Min", lo_display, "min"))
-            items.append(("field", f"{prefix}Max", hi_display, "max"))
-            items.append(("toggle", "Log scale", renderer.log_scale, "log_scale"))
-            items.append(("toggle", "Colorbar", self.show_colorbar, "colorbar"))
+            if self.sections["color"]:
+                items.append(("field", f"{prefix}Min", lo_display, "min"))
+                items.append(("field", f"{prefix}Max", hi_display, "max"))
+                items.append(("toggle", "Log scale", renderer.log_scale, "log_scale"))
+                items.append(("toggle", "Colorbar", self.show_colorbar, "colorbar"))
 
         # View controls (both modes). Speed is adjusted multiplicatively,
         # so its track is drawn permanently half-filled.
+        _hdr("VIEW & LOD", "lod")
+        perf = kwargs.get("perf")
+        if self.sections["lod"] and perf:
+            items.append(("kv", "  perf", perf))
+        if not self.sections["lod"]:
+            fov = None
+            cam_speed = None
         if fov is not None:
             items.append(("slider", "FOV °", float(fov), 10.0, 140.0, "view_fov"))
         if cam_speed is not None:
             items.append(("slider", "Speed", float(cam_speed), 0.0,
                           max(1e-12, 2.0 * float(cam_speed)), "view_speed"))
-        items.append(("slider", "Smoothing", float(renderer.hsml_scale), 0.1, 5.0, "hsml_scale"))
+        if self.sections["lod"]:
+            items.append(("slider", "Smoothing", float(renderer.hsml_scale), 0.1, 5.0, "hsml_scale"))
 
         self._cmap_name = cmap_name
         if render_mode_name == "Composite" and composite_slots:
@@ -1337,6 +1415,18 @@ class UserMenu(Panel):
         self._cbar_data = (total_w, total_h, img.tobytes())
 
     def on_click(self, x, y, app):
+        hit0 = self._hit_test(x, y)
+        if (isinstance(hit0, tuple) and len(hit0) > 3
+                and hit0[2] == "hbutton"
+                and isinstance(hit0[3], tuple)):
+            kind, val = hit0[3]
+            if kind == "set_mode" and app is not None:
+                app._render_mode_name = val
+                app._apply_render_mode()
+            elif kind == "tool":
+                self.pending_tool = val
+            self._last_items_key = None
+            return True
         self._app_ref = app
         if self._editing:
             self._commit_edit(app)

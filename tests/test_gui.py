@@ -99,3 +99,19 @@ def test_colormap_browser_categories():
             assert rev == orig + "_r"
         sw = b._swatch(rev)
         assert sw is not None and sw.shape == (b.SW_H, b.SW_W, 4)
+
+
+def test_sidebar_section_state_persists(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    from vizmo.overlay import UserMenu
+
+    m = UserMenu()
+    assert m.sections["fields"] is True  # default open
+    m._sec_fields()                       # collapse + persist
+    m._sec_lod()
+    assert m.sections["fields"] is False
+    # A fresh instance reloads the persisted state.
+    m2 = UserMenu()
+    assert m2.sections["fields"] is False
+    assert m2.sections["lod"] is False
+    assert m2.sections["types"] is True
