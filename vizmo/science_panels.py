@@ -2381,3 +2381,55 @@ class WelcomeOverlay(Panel):
         if not self.enabled:
             return
         super().render()
+
+
+SPINNER_FRAMES = ["|", "/", "-", "\\"]
+
+
+class LoadingOverlay(Panel):
+    """Startup loading screen (Section 8.A): centered panel with a
+    spinner, 400px ACCENT progress bar, and the live load status."""
+
+    def __init__(self):
+        super().__init__(DRAWER_STYLE)
+        self.enabled = True
+        self.style = PanelStyle(**{**DRAWER_STYLE.__dict__,
+                                   "position": "center"})
+        self._last_key = None
+
+    def update(self, basename, frame, progress, status):
+        if not self.enabled:
+            return
+        s = self.style
+        M, LH = s.margin, s.line_height
+        spin = SPINNER_FRAMES[(frame // 3) % len(SPINNER_FRAMES)]
+        key = (basename, spin, round(progress, 3), status,
+               self._fb_width, self._fb_height)
+        if key == self._last_key and self._tex is not None:
+            return
+        self._last_key = key
+        tw, th = 460, 4 * LH + 2 * M
+        img = Image.new("RGBA", (tw, th), DarkTheme.TRANSPARENT)
+        draw = ImageDraw.Draw(img)
+        _rounded(draw, [(0, 0), (tw - 1, th - 1)], s.radius,
+                 fill=DarkTheme.BG_SURFACE, outline=DarkTheme.BORDER)
+        draw.text((M, M), f"{spin}  Loading {basename}...",
+                  fill=DarkTheme.TEXT_PRIMARY, font=self._font)
+        bx, by = M + 10, M + int(1.6 * LH)
+        bw = 400
+        _rounded(draw, [(bx, by), (bx + bw, by + 12)], 6,
+                 fill=DarkTheme.BG_RAISED)
+        fill_w = int(bw * max(0.0, min(progress, 1.0)))
+        if fill_w > 4:
+            _rounded(draw, [(bx, by), (bx + fill_w, by + 12)], 6,
+                     fill=DarkTheme.ACCENT)
+        draw.text((M, by + 18), status or "...",
+                  fill=DarkTheme.TEXT_SECONDARY, font=self._font)
+        self._panel_w, self._panel_h = tw, th
+        self._panel_x, self._panel_y = self._panel_origin(tw, th)
+        self._upload_panel(tw, th, img.tobytes())
+
+    def render(self):
+        if not self.enabled:
+            return
+        super().render()

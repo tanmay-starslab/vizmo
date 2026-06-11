@@ -1072,7 +1072,12 @@ class SnapshotData:
         print(f"  No explicit reader matched {path}; trying yt fallback...")
         return _YtFile(path)
 
-    def __init__(self, path, particle_types=None, hsml_progress=None):
+    def __init__(self, path, particle_types=None, hsml_progress=None,
+                 progress=None):
+        # `progress`: optional shared dict the constructor mirrors its
+        # load_status/load_progress into, so a loading screen on
+        # another thread can render live state before __init__ returns.
+        self._progress_ext = progress if progress is not None else {}
         self.path = path
         self._file = self._open_snapshot(path)
         # True for cell-based AMR/structured-grid readers (Athena++ .athdf,
@@ -1412,6 +1417,10 @@ class SnapshotData:
             for i_type, p in enumerate(self.particle_types):
                 self.load_status = f"Reading PartType{p}..."
                 self.load_progress = i_type / n_types
+                ext = getattr(self, "_progress_ext", None)
+                if ext is not None:
+                    ext["status"] = self.load_status
+                    ext["progress"] = self.load_progress
                 # Make room before pulling this ptype off disk if it's not
                 # already cached. Selected ptypes (including this one) are
                 # protected from eviction.

@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.9.0 — 2026-06-10
+
+### Deep-infrastructure completion — nothing deferred remains
+- Async startup (8.A): the snapshot loads in a background thread
+  behind a live loading screen (spinner, 400px accent progress bar,
+  per-PartType status from a shared progress dict); the main loop
+  starts only once data exists; load-time toast on completion.
+- GPU derived-field bypass: Temperature/n_H computed by
+  derived_fields.wgsl and injected into the field cache, skipping the
+  CPU physics path for every consumer. Fixed a real 65,535-workgroup
+  dispatch-limit bug (17.1M particles) with 2D dispatch in both
+  compute shaders.
+- --split second-snapshot GPU pipeline: snapshot 2 uploads into its
+  own GPUCompute with centers aligned; split frames accumulate the
+  right pane from those chunks (source swap + restore per frame).
+- Volume motion-LOD: step doubling + half max_steps while the camera
+  moves, automatic restore on idle.
+- Hover tooltips: mode names and derived-field formulas in the
+  status bar (10 Hz hover tracking).
+
 ## 0.8.0 — 2026-06-10
 
 ### Added

@@ -138,8 +138,66 @@ def run_wgpu_app(
         except Exception:
             pass
 
-    data = SnapshotData(snapshot_path, particle_types=types, hsml_progress=_hsml_progress)
-    print(f"  {data.n_particles:,} particles loaded (types {data.particle_types})")
+    # Async startup (Section 8.A): the snapshot loads in a background
+    # thread while a spinner + progress-bar loading screen renders, so
+    # the window is alive and responsive from the first frame. The
+    # render loop proper never starts until the data exists, so no
+    # downstream code ever sees a half-loaded object.
+    import threading as _threading
+
+    from .wgpu_overlay import WGPULoadingOverlay
+
+    _load = {"data": None, "error": None,
+             "progress": {"status": "opening file...", "progress": 0.0}}
+
+    def _load_worker():
+        import time as _t
+
+        t0 = _t.time()
+        try:
+            _load["data"] = SnapshotData(
+                snapshot_path, particle_types=types,
+                hsml_progress=None, progress=_load["progress"])
+            _load["dt"] = _t.time() - t0
+        except Exception as e:
+            _load["error"] = e
+
+    _threading.Thread(target=_load_worker, daemon=True).start()
+    _loading_panel = WGPULoadingOverlay(device, present_format)
+    _lframe = 0
+    while _load["data"] is None and _load["error"] is None:
+        glfw.poll_events()
+        if glfw.window_should_close(window):
+            raise SystemExit(0)
+        fbw_l, fbh_l = glfw.get_framebuffer_size(window)
+        try:
+            _loading_panel.set_framebuffer_size(fbw_l, fbh_l)
+            _loading_panel.update(
+                os.path.basename(snapshot_path), _lframe,
+                _load["progress"].get("progress", 0.0),
+                _load["progress"].get("status", ""))
+            tex = canvas_context.get_current_texture()
+            enc = device.create_command_encoder()
+            rp = enc.begin_render_pass(color_attachments=[{
+                "view": tex.create_view(),
+                "clear_value": (0, 0, 0, 1),
+                "load_op": "clear", "store_op": "store"}])
+            _loading_panel.render_to_pass(rp)
+            rp.end()
+            device.queue.submit([enc.finish()])
+            canvas_context.present()
+        except Exception:
+            pass
+        _lframe += 1
+        time.sleep(1.0 / 30.0)
+    if _load["error"] is not None:
+        raise _load["error"]
+    data = _load["data"]
+    data._hsml_progress = _hsml_progress
+    print(f"  {data.n_particles:,} particles loaded "
+          f"(types {data.particle_types}) in {_load.get('dt', 0):.1f}s")
+    _load_done_toast = (f"Loaded {data.n_particles / 1e6:.1f}M particles "
+                        f"in {_load.get('dt', 0):.1f}s")
     data2 = None
     if _split_snapshot_path:
         # --split: second dataset loaded for side-by-side comparison.
@@ -149,8 +207,7 @@ def run_wgpu_app(
         data2 = SnapshotData(os.path.abspath(_split_snapshot_path),
                              particle_types=types)
         print(f"  [split] second snapshot loaded: "
-              f"{data2.n_particles:,} particles (right-pane particle "
-              f"rendering not yet implemented)")
+              f"{data2.n_particles:,} particles")
 
     # Camera
     camera = Camera(fov=fov, aspect=width / height)
@@ -274,6 +331,7 @@ def run_wgpu_app(
 
     _recents = RecentFiles()
     _recents.add(snapshot_path)
+    # (toasts exists below; fire the load toast after panel creation)
     menubar = WGPUMenuBar(device, present_format,
                           build_default_menus(_recents.get()))
     from .wgpu_overlay import WGPURightDock
@@ -303,6 +361,7 @@ def run_wgpu_app(
     # `purpose` is "inspect" (open inspector) or "aperture" (place the
     # analysis-aperture center).
     _pending_pick = {"ray": None, "frames": 0, "purpose": "inspect"}
+    toasts.show(_load_done_toast, "ok")
 
     # Analysis aperture: a world-space sphere the user places with the
     # mouse (M key). While `placing`, clicks move the center and scroll
@@ -2116,6 +2175,41 @@ def run_wgpu_app(
     pending_auto_range_frames = 0
     smooth_fps_ema = 0.0
 
+    # --split second-snapshot pipeline: a dedicated GPUCompute holds
+    # snapshot 2 (positions shifted so both centers coincide); during
+    # split frames the renderer accumulates pane 2 from these chunks.
+    gpu_compute2 = None
+    _split_chunks2 = {"chunks": None, "offset": None, "n": 0}
+
+    def _ensure_split_pipeline():
+        nonlocal gpu_compute2
+        if data2 is None or gpu_compute2 is not None:
+            return
+        try:
+            from .framing import find_center as _fc2
+
+            c1 = data.get_view_center()
+            try:
+                c2 = _fc2(data2, center_on or "densest")
+            except Exception:
+                c2 = data2.get_view_center()
+            shift = (np.asarray(c1, dtype=np.float64)
+                     - np.asarray(c2, dtype=np.float64))
+            pos2 = data2.positions + shift[None, :]
+            gpu_compute2 = GPUCompute(device)
+            m2 = data2.masses.astype(np.float32)
+            gpu_compute2.upload_subsample_only(
+                pos2, data2.hsml, m2, m2)
+            _split_chunks2["chunks"] = gpu_compute2.get_chunk_bufs()
+            _split_chunks2["offset"] = gpu_compute2.get_pos_offset()
+            _split_chunks2["n"] = data2.n_particles
+            toasts.show(
+                f"Split: snapshot 2 on GPU "
+                f"({data2.n_particles / 1e6:.1f}M)", "ok")
+        except Exception as e:
+            toasts.show(f"Split pipeline failed: {e}", "error")
+            gpu_compute2 = False  # do not retry every frame
+
     # Pre-sort and cache slot weight arrays (done once per slot config change)
     _slot_sorted = [None, None]  # (slot_id, sorted_mass, sorted_qty) per slot
 
@@ -3220,6 +3314,33 @@ def run_wgpu_app(
                         skip_los_recompute=translated,
                         skip_accum=skip_accum_this_frame,
                     )
+                    if (SPLIT_MODES[_split["mode_idx"]] is not None
+                            and data2 is not None):
+                        # Right pane = snapshot 2: swap the subsample
+                        # source to gpu_compute2's chunks, accumulate
+                        # into texture set 2, then restore.
+                        _ensure_split_pipeline()
+                        if _split_chunks2["chunks"]:
+                            saved_chunks = renderer._subsample_chunks
+                            saved_n = renderer.n_total
+                            renderer.set_subsample_chunks(
+                                _split_chunks2["chunks"],
+                                world_offset=_split_chunks2["offset"])
+                            renderer.n_particles = min(
+                                _split_chunks2["n"],
+                                renderer._subsample_max_per_frame)
+                            renderer._ensure_fbo(fb_w, fb_h, which=2)
+                            renderer._write_camera_uniforms(
+                                camera, fb_w, fb_h)
+                            renderer._render_accum(
+                                camera, fb_w, fb_h,
+                                renderer._accum_textures2,
+                                encoder=_frame_encoder)
+                            renderer.set_subsample_chunks(
+                                saved_chunks,
+                                world_offset=gpu_compute.get_pos_offset()
+                                if gpu_compute else None)
+                            renderer.n_total = saved_n
                     if SPLIT_MODES[_split["mode_idx"]] is not None:
                         # Split screen: overdraw the composite with two
                         # viewport-restricted resolves (left/top =

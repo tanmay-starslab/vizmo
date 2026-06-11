@@ -115,3 +115,31 @@ def test_sidebar_section_state_persists(tmp_path, monkeypatch):
     assert m2.sections["fields"] is False
     assert m2.sections["lod"] is False
     assert m2.sections["types"] is True
+
+
+def test_loading_overlay_layout():
+    from vizmo.science_panels import LoadingOverlay, SPINNER_FRAMES
+
+    p = LoadingOverlay()
+    p.set_framebuffer_size(1280, 800)
+    p.update("snap.hdf5", frame=0, progress=0.47,
+             status="Reading PartType0...")
+    assert p._panel_w == 460 and p._panel_h > 80
+    assert len(SPINNER_FRAMES) == 4
+    # Progress edge cases render without error.
+    p.update("snap.hdf5", frame=7, progress=0.0, status="")
+    p.update("snap.hdf5", frame=13, progress=1.0, status="ready")
+
+
+def test_data_manager_progress_dict(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "c"))
+    from tests.conftest import make_snapshot
+    from vizmo.data_manager import SnapshotData
+
+    path = make_snapshot(str(tmp_path / "s.hdf5"), n_gas=200, n_dm=100)
+    prog = {}
+    d = SnapshotData(path, particle_types=[0, 1], progress=prog)
+    # The shared dict mirrored live status during the load.
+    assert "status" in prog and "progress" in prog
+    assert 0.0 <= prog["progress"] <= 1.0
+    d.close()
