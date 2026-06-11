@@ -90,7 +90,12 @@ def test_colormap_browser_categories():
     b.tab = "Diverging"
     b.reversed = True
     names = b.names_for_tab()
-    assert all(n.endswith("_r") for n in names)
-    # Reversed names still resolve to real colormaps.
-    sw = b._swatch(names[0])
-    assert sw is not None and sw.shape == (b.SW_H, b.SW_W, 4)
+    # Reversal TOGGLES the _r suffix (RdBu_r -> RdBu, coolwarm ->
+    # coolwarm_r); every reversed name must resolve to a real cmap.
+    for orig, rev in zip(CMAP_CATEGORIES["Diverging"], names):
+        if orig.endswith("_r"):
+            assert rev == orig[:-2]
+        else:
+            assert rev == orig + "_r"
+        sw = b._swatch(rev)
+        assert sw is not None and sw.shape == (b.SW_H, b.SW_W, 4)
