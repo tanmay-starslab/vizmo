@@ -86,3 +86,30 @@ def test_save_spectrum_pdf(tmp_path):
     out = save_spectrum_pdf(sl, str(tmp_path / "s.pdf"),
                             "snap.hdf5", 0.1)
     assert open(out, "rb").read(5) == b"%PDF-"
+
+
+def test_drawer_sightline_panel_no_style_shadowing():
+    """Regression: a Sightline in the list must not shadow the panel
+    style inside update() ('Sightline' has no attribute 'min_width')."""
+    import types
+
+    from vizmo.science_panels import AnalysisDrawer
+    from vizmo.spectro import Sightline
+
+    d = AnalysisDrawer()
+    d.set_framebuffer_size(1280, 800)
+    sl = Sightline(start=np.zeros(3), end=np.ones(3), label="SL-001")
+    sl.impact_b_kpc = 12.0
+    sl.NHI = 1e17
+    sl.N_OVI = 1e14
+    sl.N_CIV = 1e13
+    d.sightlines = [sl]
+    stub = types.SimpleNamespace(
+        available_fields_with_derived=lambda: [],
+        filters=[], n_particles=0)
+    for mode in ("sightline", "specview"):
+        d.enabled = True
+        d.mode = mode
+        d.update(stub)          # must not raise
+        assert d._panel_w > 100
+        d.enabled = False

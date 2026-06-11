@@ -1482,15 +1482,19 @@ class AnalysisDrawer(Panel):
                 rows = [("No sightlines", "Shift+A to place one")]
             else:
                 rows = []
-                for s in sls[-3:]:
-                    rows.append((s.label, f"b={s.impact_b_kpc:.0f} kpc"
-                                 if s.impact_b_kpc is not None else ""))
-                    if s.NHI and s.NHI > 0:
+                # NB: do not name this loop variable `s` — it would
+                # shadow the panel style bound above (live crash:
+                # 'Sightline' object has no attribute 'min_width').
+                for sl_ in sls[-3:]:
+                    rows.append((sl_.label,
+                                 f"b={sl_.impact_b_kpc:.0f} kpc"
+                                 if sl_.impact_b_kpc is not None else ""))
+                    if sl_.NHI and sl_.NHI > 0:
                         rows.append(("  log N(HI) fast",
-                                     f"{np.log10(s.NHI):.2f} cm^-2"))
-                    if (s.trident_spectrum_path
+                                     f"{np.log10(sl_.NHI):.2f} cm^-2"))
+                    if (sl_.trident_spectrum_path
                             and __import__("os").path.exists(
-                                s.trident_spectrum_path)):
+                                sl_.trident_spectrum_path)):
                         rows.append(("  Trident", "spectrum on disk"))
         elif self.mode == "sightline":
             sls = getattr(self, "sightlines", [])
@@ -1498,16 +1502,17 @@ class AnalysisDrawer(Panel):
                 rows = [("No sightlines", "Shift+A, then click 2 points")]
             else:
                 rows = []
-                for s in sls:
-                    rows.append((s.label,
-                                 f"b={s.impact_b_kpc:.0f} kpc"
-                                 if s.impact_b_kpc is not None else ""))
+                # Same shadowing hazard as above: keep `s` = style.
+                for sl_ in sls:
+                    rows.append((sl_.label,
+                                 f"b={sl_.impact_b_kpc:.0f} kpc"
+                                 if sl_.impact_b_kpc is not None else ""))
                     def _lg(v):
                         return (f"{np.log10(v):.2f}" if v and v > 0
                                 else "-")
-                    rows.append(("  log N(HI)", _lg(s.NHI)))
-                    rows.append(("  log N(OVI)*", _lg(s.N_OVI)))
-                    rows.append(("  log N(CIV)*", _lg(s.N_CIV)))
+                    rows.append(("  log N(HI)", _lg(sl_.NHI)))
+                    rows.append(("  log N(OVI)*", _lg(sl_.N_OVI)))
+                    rows.append(("  log N(CIV)*", _lg(sl_.N_CIV)))
                 rows.append(("* CIE approx", "use Trident for science"))
         elif self.mode == "stats":
             sc_center, sc_radius = self._active_scope()
