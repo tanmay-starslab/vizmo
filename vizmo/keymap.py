@@ -32,6 +32,7 @@ KEYBINDINGS = [
     ("J", "Toggle radial profile about the view center", "Analysis"),
     ("U", "Toggle region statistics (sphere about center)", "Analysis"),
     ("Shift+K", "Toggle power spectrum P(k) panel", "Analysis"),
+    ("Shift+P", "Phase brush: select gas in phase space", "Analysis"),
     ("Shift+Z", "Slice plane normal / isosurface threshold cycle", "Visualization"),
     ("Shift+I", "Toggle isosurface panel (voxelize + marching cubes)", "Visualization"),
     ("Shift+S", "Split screen: off / left-right / top-bottom", "Visualization"),

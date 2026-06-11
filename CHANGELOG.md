@@ -1,5 +1,37 @@
 # Changelog
 
+## 0.11.0 - 2026-06-10
+
+### Added
+- Phase-diagram brushing (Shift+P): rect / polygon / ellipse
+  selections drawn in data coordinates on the fixed-geometry phase
+  plot (two-click rect/ellipse, click-vertices + Close for polygon);
+  submit computes the particle mask (log-axis aware, NaN-safe),
+  highlights the selection in the 3D view as a capped 500k point
+  cloud, shows an 80px LOS inset heat map, and toasts the selected
+  fraction. Escape clears. Brush-only toggles thread the mask into
+  radial profiles and region statistics.
+- Marginal histograms on the phase diagram (top + right, 20 bins,
+  accent bars) with green brushed-subset overlays.
+- Observational CSV overlays on the phase diagram (columns named
+  after the displayed fields + optional label), multiple datasets in
+  cycling colors, legend, Obs- to clear - built for COS-IGrM
+  constraints on n_H-T.
+- Science buttons: t_cool/t_ff = 1 precipitation threshold locus
+  (bisection on the TN01 cooling function; rises with density as
+  tested), T_vir line from the aperture rotation curve, NFW density-
+  profile fit overlay (rho_s/r_s recovered to 2% in tests), stats
+  clipboard export (pyperclip fallback) + compare-with-previous diff
+  toasts, orbit-to-galpy script export bridging the fitted NFW
+  potential into the galpy ecosystem.
+
+### Notes
+- Split-screen second-snapshot rendering shipped in v0.9.0; the
+  architectural pools refactor specd alongside it was intentionally
+  skipped (working pipeline, zero new capability). Half labels ride
+  the RenderState fields. Brush points are 1px (point-list topology
+  has no size control in WebGPU).
+
 ## 0.10.0 - 2026-06-10
 
 ### Added

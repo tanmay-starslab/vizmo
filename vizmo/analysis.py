@@ -321,7 +321,8 @@ TEMPERATURE_PHASES = [
 
 
 def radial_profile(data, field, center=None, r_min_kpc=None, r_max_kpc=None,
-                   n_bins=40, max_samples=4_000_000, region=None):
+                   n_bins=40, max_samples=4_000_000, region=None,
+                   brush_mask=None):
     """Mass-weighted radial profile of `field` about `center`.
 
     Special quantities (SPECIAL_PROFILES):
@@ -358,6 +359,8 @@ def radial_profile(data, field, center=None, r_min_kpc=None, r_max_kpc=None,
     if region is not None:
         keep = region.contains(pos[sel])
         sel = sel[keep] if isinstance(sel, np.ndarray) else np.flatnonzero(keep)
+    if brush_mask is not None:
+        sel = sel[np.asarray(brush_mask, dtype=bool)[sel]]
 
     r_code = np.linalg.norm(pos[sel] - center[None, :], axis=1)
     r_kpc = r_code * units.length_to_kpc
@@ -537,7 +540,7 @@ PHASE_WEIGHTINGS = ["mass", "volume", "SFR", "number"]
 
 def phase_histogram(data, xfield, yfield, n_bins=128, max_samples=4_000_000,
                     center=None, radius_kpc=None, weighting="mass",
-                    region=None):
+                    region=None, brush_premask=None):
     """Weighted 2D histogram of two fields.
 
     `weighting`: "mass" (Msun), "volume" (kpc^3, from m/rho), "SFR"
@@ -561,6 +564,10 @@ def phase_histogram(data, xfield, yfield, n_bins=128, max_samples=4_000_000,
         sel = np.arange(n)
         frac = 1.0
 
+    if brush_premask is not None:
+        sel = sel[np.asarray(brush_premask, dtype=bool)[sel]]
+        if sel.size == 0:
+            return None
     if region is not None:
         sel = sel[region.contains(data.positions[sel])]
         if sel.size == 0:
@@ -637,7 +644,8 @@ def phase_histogram(data, xfield, yfield, n_bins=128, max_samples=4_000_000,
 # Region statistics
 # ---------------------------------------------------------------------------
 
-def region_stats(data, center=None, radius_kpc=None, region=None):
+def region_stats(data, center=None, radius_kpc=None, region=None,
+                 brush_mask=None):
     """Aggregate physical properties of a sphere around `center`.
 
     Returns a list of (label, value-string) rows ready for display.
@@ -655,6 +663,8 @@ def region_stats(data, center=None, radius_kpc=None, region=None):
         radius_kpc = float(np.percentile(r_kpc, 50.0))
     inside = (region.contains(pos) if region is not None
               else r_kpc <= radius_kpc)
+    if brush_mask is not None:
+        inside = inside & np.asarray(brush_mask, dtype=bool)
     n_in = int(inside.sum())
 
     rows = [("Radius", f"{radius_kpc:,.1f} kpc"),
@@ -962,3 +972,154 @@ def nice_scale_bar(target_kpc):
     if val >= 1.0:
         return val, f"{val:g} kpc"
     return val, f"{val*1000:g} pc"
+
+
+# ---------------------------------------------------------------------------
+# Phase-diagram brushing (Item 1): selection geometry + masks
+# ---------------------------------------------------------------------------
+
+def _phase_display_values(data, ph, max_samples=4_000_000):
+    """Per-particle (x, y) in the phase diagram's DISPLAY space (log10
+    where the histogram log-scaled an axis), full-length arrays with
+    NaN where undefined."""
+    x = np.asarray(data.get_field(ph["xfield"]), dtype=np.float64)
+    y = np.asarray(data.get_field(ph["yfield"]), dtype=np.float64)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        if ph["xlog"]:
+            x = np.log10(np.where(x > 0, x, np.nan))
+        if ph["ylog"]:
+            y = np.log10(np.where(y > 0, y, np.nan))
+    return x, y
+
+
+def point_in_polygon(px, py, poly):
+    """Vectorized ray-casting point-in-polygon. poly: [(x, y), ...]."""
+    px = np.asarray(px, dtype=np.float64)
+    py = np.asarray(py, dtype=np.float64)
+    inside = np.zeros(px.shape, dtype=bool)
+    n = len(poly)
+    j = n - 1
+    for i in range(n):
+        xi, yi = poly[i]
+        xj, yj = poly[j]
+        crosses = ((yi > py) != (yj > py)) & (
+            px < (xj - xi) * (py - yi) / (yj - yi + 1e-300) + xi)
+        inside ^= crosses
+        j = i
+    return inside
+
+
+def phase_selection_mask(data, ph, shape):
+    """Boolean particle mask for a phase-space selection.
+
+    `shape`: {"kind": "rect", "x0", "x1", "y0", "y1"} |
+             {"kind": "polygon", "points": [(x, y), ...]} |
+             {"kind": "ellipse", "cx", "cy", "rx", "ry"}
+    All coordinates in the diagram's display space (log10 axes where
+    the histogram is log-scaled). NaN display values never select.
+    """
+    x, y = _phase_display_values(data, ph)
+    ok = np.isfinite(x) & np.isfinite(y)
+    mask = np.zeros(len(x), dtype=bool)
+    if shape["kind"] == "rect":
+        x0, x1 = sorted((shape["x0"], shape["x1"]))
+        y0, y1 = sorted((shape["y0"], shape["y1"]))
+        mask[ok] = ((x[ok] >= x0) & (x[ok] <= x1)
+                    & (y[ok] >= y0) & (y[ok] <= y1))
+    elif shape["kind"] == "polygon":
+        mask[ok] = point_in_polygon(x[ok], y[ok], shape["points"])
+    elif shape["kind"] == "ellipse":
+        rx = max(abs(shape["rx"]), 1e-12)
+        ry = max(abs(shape["ry"]), 1e-12)
+        mask[ok] = (((x[ok] - shape["cx"]) / rx) ** 2
+                    + ((y[ok] - shape["cy"]) / ry) ** 2) <= 1.0
+    else:
+        raise ValueError(f"unknown brush shape {shape['kind']!r}")
+    return mask
+
+
+def brush_inset_histogram(data, mask, res=32):
+    """LOS-projected (x, y) 2D histogram of brushed particles for the
+    little inset map. Returns (res, res) counts (may be all zero)."""
+    pos = data.positions[mask]
+    if len(pos) == 0:
+        return np.zeros((res, res))
+    lo = pos.min(axis=0)
+    hi = pos.max(axis=0)
+    span = np.maximum(hi - lo, 1e-12)
+    H, _, _ = np.histogram2d(
+        pos[:, 0], pos[:, 1], bins=res,
+        range=[[lo[0], lo[0] + span[0]], [lo[1], lo[1] + span[1]]])
+    return H
+
+
+def phase_marginals(ph, n_bins=20):
+    """Top/right marginal bar heights from the 2D histogram itself
+    (same weighting by construction). Returns (x_marginal, y_marginal)
+    each rebinned to n_bins and normalized to peak 1."""
+    H = ph["H"]
+    mx = H.sum(axis=1)
+    my = H.sum(axis=0)
+
+    def rebin(a):
+        k = max(len(a) // n_bins, 1)
+        out = a[: (len(a) // k) * k].reshape(-1, k).sum(axis=1)
+        return out / max(out.max(), 1e-300)
+
+    return rebin(mx), rebin(my)
+
+
+def tcool_tff_unity_locus(z_zsun=0.3, logn_range=(-6.0, 2.0), n_pts=64):
+    """The precipitation threshold: (log n_H, log T) where
+    t_cool/t_ff = 1, using the same Tozzi & Norman Lambda(T, Z) as
+    CoolingTime and t_ff of a gas sphere at density rho = n_H m_p/X.
+
+    t_cool = 1.5 * 2.3 n k T / (1.2 n^2 Lambda)
+    t_ff   = sqrt(3 pi / (32 G rho))
+    Solved for T by bisection on a log-T grid per density.
+    """
+    from .physics import (BOLTZMANN_CGS, GRAV_CGS, PROTONMASS_CGS,
+                          XH_DEFAULT, cooling_function_tn01)
+
+    logn = np.linspace(*logn_range, n_pts)
+    logT_out = np.full(n_pts, np.nan)
+    logT_grid = np.linspace(3.5, 9.0, 400)
+    T = 10.0**logT_grid
+    for i, ln in enumerate(logn):
+        n = 10.0**ln
+        rho = n * PROTONMASS_CGS / XH_DEFAULT
+        tff = np.sqrt(3 * np.pi / (32 * GRAV_CGS * rho))
+        lam = cooling_function_tn01(T, z_zsun)
+        tc = 1.5 * 2.3 * BOLTZMANN_CGS * T / (1.2 * n * lam)
+        ratio = tc / tff
+        # First crossing of ratio = 1 from below (cooling-dominated
+        # below, stable above).
+        s = np.sign(np.log(ratio))
+        cross = np.flatnonzero(np.diff(s) != 0)
+        if cross.size:
+            j = cross[0]
+            f = -np.log(ratio[j]) / (np.log(ratio[j + 1])
+                                     - np.log(ratio[j]) + 1e-300)
+            logT_out[i] = logT_grid[j] + f * (logT_grid[j + 1]
+                                              - logT_grid[j])
+    return logn, logT_out
+
+
+def fit_nfw_density_profile(r_kpc, rho_msun_kpc3):
+    """Fit rho(r) = rho_s / ((r/r_s)(1+r/r_s)^2) in log space.
+    Returns (rho_s, r_s)."""
+    from scipy.optimize import curve_fit
+
+    ok = (np.isfinite(rho_msun_kpc3) & (rho_msun_kpc3 > 0)
+          & (r_kpc > 0))
+    r, rho = r_kpc[ok], rho_msun_kpc3[ok]
+    if len(r) < 5:
+        raise ValueError("too few finite profile points for NFW fit")
+
+    def logrho(rr, lrs, lr_s):
+        x = rr / 10.0**lr_s
+        return lrs - np.log10(x * (1 + x) ** 2)
+
+    p0 = [np.log10(np.median(rho)), np.log10(np.median(r))]
+    popt, _ = curve_fit(logrho, r, np.log10(rho), p0=p0, maxfev=20000)
+    return 10.0**popt[0], 10.0**popt[1]

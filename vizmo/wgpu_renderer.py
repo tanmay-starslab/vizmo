@@ -3763,3 +3763,90 @@ class HaloMarkerRenderer:
         rpass.set_bind_group(0, self._bg)
         rpass.set_vertex_buffer(0, self._vbo)
         rpass.draw(self.n_vertices)
+
+
+class BrushHighlightRenderer:
+    """Brushed-particle overlay (Item 1.3): point-list cloud drawn on
+    top of the particle render at full opacity, capped at 500k points,
+    independent of the LOD subsampling. WebGPU points are 1px; the
+    cap + full opacity keep the selection clearly visible (the spec's
+    2px points are not expressible in point-list topology)."""
+
+    MAX_POINTS = 500_000
+
+    def __init__(self, device, present_format):
+        self.device = device
+        self.n_points = 0
+        shader = device.create_shader_module(
+            code=_load_wgsl("streamlines.wgsl"))
+        self._bgl = device.create_bind_group_layout(entries=[
+            {"binding": 0, "visibility": wgpu.ShaderStage.VERTEX,
+             "buffer": {"type": "uniform"}}])
+        layout = device.create_pipeline_layout(
+            bind_group_layouts=[self._bgl])
+        self._pipeline = device.create_render_pipeline(
+            layout=layout,
+            vertex={"module": shader, "entry_point": "vs_main",
+                    "buffers": [{
+                        "array_stride": 28, "step_mode": "vertex",
+                        "attributes": [
+                            {"format": "float32x3", "offset": 0,
+                             "shader_location": 0},
+                            {"format": "float32x4", "offset": 12,
+                             "shader_location": 1}]}]},
+            primitive={"topology": "point-list"},
+            fragment={"module": shader, "entry_point": "fs_main",
+                      "targets": [{"format": present_format, "blend": {
+                          "color": {"src_factor": "src-alpha",
+                                    "dst_factor": "one-minus-src-alpha"},
+                          "alpha": {"src_factor": "one",
+                                    "dst_factor": "one-minus-src-alpha"}}}]},
+        )
+        self._ubuf = device.create_buffer(
+            size=64, usage=(wgpu.BufferUsage.UNIFORM
+                            | wgpu.BufferUsage.COPY_DST))
+        self._bg = device.create_bind_group(
+            layout=self._bgl,
+            entries=[{"binding": 0, "resource": {"buffer": self._ubuf}}])
+        self._vbo = None
+        self._ref = np.zeros(3)
+
+    def set_points(self, positions, color=(1.0, 1.0, 0.3, 0.95)):
+        n = len(positions)
+        if n == 0:
+            self.n_points = 0
+            return
+        if n > self.MAX_POINTS:
+            rng = np.random.default_rng(0)
+            positions = positions[rng.choice(n, self.MAX_POINTS,
+                                             replace=False)]
+            n = self.MAX_POINTS
+        self._ref = positions.mean(axis=0)
+        inter = np.empty((n, 7), dtype=np.float32)
+        inter[:, :3] = positions - self._ref[None, :]
+        inter[:, 3:] = np.asarray(color, dtype=np.float32)
+        self._vbo = self.device.create_buffer_with_data(
+            data=inter.tobytes(), usage=wgpu.BufferUsage.VERTEX)
+        self.n_points = n
+
+    def clear(self):
+        self.n_points = 0
+
+    def write_uniforms(self, camera):
+        if self.n_points == 0:
+            return
+        view = camera.view_matrix().astype(np.float64)
+        proj = camera.projection_matrix().astype(np.float64)
+        t = np.eye(4)
+        t[:3, 3] = self._ref
+        mvp = (proj @ view @ t).astype(np.float32)
+        self.device.queue.write_buffer(self._ubuf, 0,
+                                       mvp.T.copy().tobytes())
+
+    def render_to_pass(self, rpass):
+        if self.n_points == 0 or self._vbo is None:
+            return
+        rpass.set_pipeline(self._pipeline)
+        rpass.set_bind_group(0, self._bg)
+        rpass.set_vertex_buffer(0, self._vbo)
+        rpass.draw(self.n_points)

@@ -703,6 +703,18 @@ class AnalysisDrawer(Panel):
         # Spectrum viewer state (Section 3.D).
         self._spec_compare = False
         self._spec_ion = None
+        # Phase brushing (Item 1) + overlays (Items 2/3/5C).
+        self.brush_active = False
+        self.brush_kind = "rect"        # rect | polygon | ellipse
+        self.brush_points = []          # clicks in DATA coords
+        self.brush_shape = None         # committed shape dict
+        self.brush_mask = None          # boolean particle mask
+        self.brush_only = False         # analysis uses mask
+        self.obs_datasets = []          # [(name, x, y, labels), ...]
+        self.show_precip_line = False
+        self.tvir_K = None
+        self._phase_geom = None         # plot-pixel <-> data mapping
+        self._nfw_fit = None            # (rho_s, r_s) overlay on profile
 
     # -- filters helpers -----------------------------------------------------
 
@@ -819,12 +831,32 @@ class AnalysisDrawer(Panel):
                 xf, yf = presets[self._phase_idx]
             wgt = PHASE_WEIGHTINGS[self._phase_weight_idx
                                    % len(PHASE_WEIGHTINGS)]
-            key = ("phase", xf, yf, wgt, data.n_particles, sc_key)
+            bkey = (None if self.brush_mask is None
+                    else int(self.brush_mask.sum()))
+            okey = (len(self.obs_datasets), self.show_precip_line,
+                    self.tvir_K, self.brush_active,
+                    len(self.brush_points),
+                    None if self.brush_shape is None
+                    else tuple(sorted(self.brush_shape.items()))
+                    if self.brush_shape["kind"] != "polygon"
+                    else len(self.brush_shape["points"]))
+            key = ("phase", xf, yf, wgt, data.n_particles, sc_key,
+                   bkey, okey)
             if key not in self._cache:
                 ph = analysis.phase_histogram(
                     data, xf, yf, center=sc_center, radius_kpc=sc_radius,
                     weighting=wgt, region=self._active_region())
                 self._last_phase = ph
+                if self.brush_mask is not None and ph is not None:
+                    sub = analysis.phase_histogram(
+                        data, xf, yf, weighting=wgt,
+                        region=self._active_region(),
+                        brush_premask=self.brush_mask)
+                    self._brush_marginals = (
+                        analysis.phase_marginals(sub, 20)
+                        if sub is not None else None)
+                else:
+                    self._brush_marginals = None
                 self._cache[key] = self._render_phase(ph, scale)
             return self._cache[key], f"{xf} vs {yf}"
 
@@ -835,7 +867,8 @@ class AnalysisDrawer(Panel):
             split = (self._profile_split
                      and f not in analysis.SPECIAL_PROFILES
                      and "Temperature" in data.available_fields_with_derived())
-            key = ("profile", f, split, data.n_particles, sc_key)
+            key = ("profile", f, split, data.n_particles, sc_key,
+                   self.brush_only, self._nfw_fit)
             if key not in self._cache:
                 if split:
                     r, tracks, unit = analysis.radial_profile_by_phase(
@@ -844,12 +877,14 @@ class AnalysisDrawer(Panel):
                     self._cache[key] = self._render_profile_tracks(
                         r, tracks, unit, f, scale)
                 else:
+                    bm = (self.brush_mask if self.brush_only else None)
                     r, prof, unit = analysis.radial_profile(
                         data, f, center=sc_center, r_max_kpc=sc_radius,
-                        region=self._active_region())
+                        region=self._active_region(), brush_mask=bm)
                     self._last_profile = (r, prof, f, unit)
+                    nfw = (self._nfw_fit if f == "Density" else None)
                     self._cache[key] = self._render_profile(
-                        r, prof, unit, f, scale)
+                        r, prof, unit, f, scale, nfw=nfw)
             return self._cache[key], f"{f}(r)"
 
         if self.mode == "orbit":
@@ -889,37 +924,144 @@ class AnalysisDrawer(Panel):
             return self._cache[key], box
         return None, ""
 
+    AXL, AXB, AXW, AXH = 0.16, 0.14, 0.62, 0.66  # fixed axes box
+
     def _render_phase(self, ph, scale):
         from matplotlib.figure import Figure
         from matplotlib.colors import LogNorm
 
-        fig = Figure(figsize=(4.7 * scale, 4.1 * scale), dpi=100)
-        ax = fig.add_subplot(111)
+        W = int(470 * scale)
+        Hpx = int(410 * scale)
+        fig = Figure(figsize=(W / 100, Hpx / 100), dpi=100)
+        ax = fig.add_axes([self.AXL, self.AXB, self.AXW, self.AXH])
         if ph is None:
             ax.text(0.5, 0.5, "no data", ha="center", va="center")
-        else:
-            H = ph["H"].T
-            vmax = H.max()
-            with np.errstate(invalid="ignore"):
-                im = ax.imshow(
-                    H, origin="lower", aspect="auto", cmap="inferno",
-                    norm=LogNorm(vmin=max(vmax * 1e-6, 1e-30), vmax=max(vmax, 1e-29)),
-                    extent=[ph["xedges"][0], ph["xedges"][-1],
-                            ph["yedges"][0], ph["yedges"][-1]],
-                    interpolation="nearest",
-                )
-            cb = fig.colorbar(im, ax=ax, pad=0.02)
-            cb.set_label(ph.get("wlabel", "mass [Msun]"),
-                         color=(0.88, 0.9, 0.95), fontsize=9)
-            cb.ax.tick_params(colors=(0.82, 0.85, 0.9), labelsize=8)
-            cb.outline.set_edgecolor((0.75, 0.78, 0.85, 0.8))
-            ax.set_xlabel(ph["xlabel"], fontsize=10)
-            ax.set_ylabel(ph["ylabel"], fontsize=10)
+            _dark_axes(fig, ax)
+            return _fig_to_image(fig)
+        H = ph["H"].T
+        vmax = H.max()
+        with np.errstate(invalid="ignore"):
+            ax.imshow(
+                H, origin="lower", aspect="auto", cmap="inferno",
+                norm=LogNorm(vmin=max(vmax * 1e-6, 1e-30),
+                             vmax=max(vmax, 1e-29)),
+                extent=[ph["xedges"][0], ph["xedges"][-1],
+                        ph["yedges"][0], ph["yedges"][-1]],
+                interpolation="nearest")
+        ax.set_xlabel(ph["xlabel"], fontsize=10)
+        ax.set_ylabel(ph["ylabel"], fontsize=10)
+
+        # Marginal histograms (Item 2), brushed overlay in green.
+        from .analysis import phase_marginals
+
+        mx, my = phase_marginals(ph, n_bins=20)
+        axt = fig.add_axes([self.AXL, self.AXB + self.AXH + 0.01,
+                            self.AXW, 0.10])
+        axr = fig.add_axes([self.AXL + self.AXW + 0.01, self.AXB,
+                            0.10, self.AXH])
+        xs = np.linspace(ph["xedges"][0], ph["xedges"][-1],
+                         len(mx) + 1)
+        ys = np.linspace(ph["yedges"][0], ph["yedges"][-1],
+                         len(my) + 1)
+        axt.bar(xs[:-1], mx, width=np.diff(xs), align="edge",
+                color=(0.24, 0.49, 1.0, 0.6))
+        axr.barh(ys[:-1], my, height=np.diff(ys), align="edge",
+                 color=(0.24, 0.49, 1.0, 0.6))
+        if self.brush_mask is not None and getattr(
+                self, "_brush_marginals", None) is not None:
+            bmx, bmy = self._brush_marginals
+            axt.bar(xs[:-1], bmx, width=np.diff(xs), align="edge",
+                    color=(0.15, 0.79, 0.48, 0.8))
+            axr.barh(ys[:-1], bmy, height=np.diff(ys), align="edge",
+                     color=(0.15, 0.79, 0.48, 0.8))
+        for a in (axt, axr):
+            a.set_xticks([])
+            a.set_yticks([])
+            a.set_facecolor((0, 0, 0, 0))
+            for sp in a.spines.values():
+                sp.set_visible(False)
+        axt.set_xlim(ph["xedges"][0], ph["xedges"][-1])
+        axr.set_ylim(ph["yedges"][0], ph["yedges"][-1])
+
+        # Observational overlays (Item 3).
+        obs_colors = [(0.96, 0.65, 0.14), (0.9, 0.24, 0.24),
+                      (0.15, 0.79, 0.48), (0.24, 0.49, 1.0)]
+        for k, (name, ox, oy, labels) in enumerate(self.obs_datasets):
+            c = obs_colors[k % len(obs_colors)]
+            ax.scatter(ox, oy, s=18, color=c, edgecolors="black",
+                       linewidths=0.5, zorder=5,
+                       label=f"Obs: {name[:18]}")
+            if labels is not None:
+                for xx, yy, lb in zip(ox, oy, labels):
+                    ax.annotate(str(lb)[:2], (xx, yy), fontsize=6,
+                                color="white",
+                                xytext=(3, 3),
+                                textcoords="offset points")
+        # Precipitation threshold + T_vir (Item 5C) on n_H-T axes.
+        if (self.show_precip_line and ph["xfield"] == "NumberDensity"
+                and ph["yfield"] == "Temperature"):
+            from .analysis import tcool_tff_unity_locus
+
+            ln, lT = tcool_tff_unity_locus()
+            ok = np.isfinite(lT)
+            ax.plot(ln[ok], lT[ok], ls="--", lw=1.2, color="white",
+                    label="t_cool/t_ff = 1")
+        if self.tvir_K is not None and ph["yfield"] == "Temperature":
+            yv = (np.log10(self.tvir_K) if ph["ylog"]
+                  else self.tvir_K)
+            ax.axhline(yv, ls="--", lw=1.2, color=(0.96, 0.65, 0.14),
+                       label="T_vir")
+        # Brush shape preview / committed shape.
+        shp = self.brush_shape
+        if shp is None and len(self.brush_points) >= 2 \
+                and self.brush_kind == "polygon":
+            pts = self.brush_points
+            ax.plot([p_[0] for p_ in pts], [p_[1] for p_ in pts],
+                    color=(0.24, 0.49, 1.0), lw=1.2)
+        if shp is not None:
+            acc = (0.24, 0.49, 1.0)
+            if shp["kind"] == "rect":
+                from matplotlib.patches import Rectangle
+
+                ax.add_patch(Rectangle(
+                    (min(shp["x0"], shp["x1"]),
+                     min(shp["y0"], shp["y1"])),
+                    abs(shp["x1"] - shp["x0"]),
+                    abs(shp["y1"] - shp["y0"]),
+                    fill=True, facecolor=acc + (0.2,),
+                    edgecolor=acc, lw=1.4))
+            elif shp["kind"] == "ellipse":
+                from matplotlib.patches import Ellipse as _El
+
+                ax.add_patch(_El((shp["cx"], shp["cy"]),
+                                 2 * shp["rx"], 2 * shp["ry"],
+                                 fill=True, facecolor=acc + (0.2,),
+                                 edgecolor=acc, lw=1.4))
+            elif shp["kind"] == "polygon":
+                from matplotlib.patches import Polygon as _Pg
+
+                ax.add_patch(_Pg(shp["points"], closed=True,
+                                 fill=True, facecolor=acc + (0.2,),
+                                 edgecolor=acc, lw=1.4))
+        if (self.obs_datasets or self.show_precip_line
+                or self.tvir_K is not None):
+            leg = ax.legend(fontsize=6, framealpha=0.2,
+                            labelcolor="white", loc="upper right")
+            leg.get_frame().set_facecolor((0.1, 0.12, 0.18))
+        ax.set_xlim(ph["xedges"][0], ph["xedges"][-1])
+        ax.set_ylim(ph["yedges"][0], ph["yedges"][-1])
         _dark_axes(fig, ax)
-        fig.tight_layout(pad=1.2)
+        # Pixel<->data mapping for brush clicks (fixed axes => exact).
+        self._phase_geom = {
+            "img_wh": (W, Hpx),
+            "ax_px": (self.AXL * W, (1 - self.AXB - self.AXH) * Hpx,
+                      self.AXW * W, self.AXH * Hpx),
+            "xlim": (ph["xedges"][0], ph["xedges"][-1]),
+            "ylim": (ph["yedges"][0], ph["yedges"][-1]),
+        }
         return _fig_to_image(fig)
 
-    def _render_profile(self, r, prof, unit, field, scale):
+    def _render_profile(self, r, prof, unit, field, scale, nfw=None):
         from matplotlib.figure import Figure
 
         fig = Figure(figsize=(4.7 * scale, 3.9 * scale), dpi=100)
@@ -927,6 +1069,15 @@ class AnalysisDrawer(Panel):
         ok = np.isfinite(prof)
         if ok.sum() > 1:
             ax.plot(r[ok], prof[ok], lw=2.0, color=(0.42, 0.72, 1.0))
+            if nfw is not None:
+                rho_s, r_s = nfw
+                x = r[ok] / r_s
+                ax.plot(r[ok], rho_s / (x * (1 + x) ** 2), ls="--",
+                        lw=1.4, color="white",
+                        label=f"NFW r_s={r_s:.0f} kpc")
+                leg = ax.legend(fontsize=7, framealpha=0.2,
+                                labelcolor="white")
+                leg.get_frame().set_facecolor((0.1, 0.12, 0.18))
             ax.set_xscale("log")
             vals = prof[ok]
             if (vals > 0).all() and vals.max() / max(vals.min(), 1e-300) > 30:
@@ -1363,11 +1514,13 @@ class AnalysisDrawer(Panel):
             r_use = sc_radius if sc_radius is not None else self._stats_radius_kpc
             sck = (None if sc_center is None
                    else tuple(np.round(sc_center, 3)))
-            key = ("stats", r_use, data.n_particles, sck)
+            key = ("stats", r_use, data.n_particles, sck,
+                   self.brush_only)
             if key not in self._cache:
+                bm = (self.brush_mask if self.brush_only else None)
                 self._cache[key] = analysis.region_stats(
                     data, center=sc_center, radius_kpc=r_use,
-                    region=self._active_region())
+                    region=self._active_region(), brush_mask=bm)
             rows, used_r = self._cache[key]
             if sc_radius is None:
                 self._stats_radius_kpc = used_r
@@ -1404,7 +1557,9 @@ class AnalysisDrawer(Panel):
             kv_w = max(kv_w, ba[2] - ba[0])
             tw = max(tw, ba[2] - ba[0] + bb[2] - bb[0] + 40 + M * 2)
         header_h = LH + 10
-        footer_h = LH + 8 if self.mode in ("phase", "profile", "stats") else 6
+        footer_h = (2 * LH + 8 if self.mode == "phase"
+                    else LH + 8 if self.mode in ("profile", "stats")
+                    else 6)
         body_h = (plot_img.height + 8 + LH * len(rows)
                   if plot_img is not None
                   else LH * max(len(rows), 1) + 8)
@@ -1433,6 +1588,7 @@ class AnalysisDrawer(Panel):
 
         y = header_h + 4
         if plot_img is not None:
+            self._plot_img_pos = ((tw - plot_img.width) // 2, y)
             img.alpha_composite(plot_img, ((tw - plot_img.width) // 2, y))
             y += plot_img.height + 4
             for a, b in rows:
@@ -1509,6 +1665,11 @@ class AnalysisDrawer(Panel):
             bx = fbtn(bx, ">", "next")
             bx = fbtn(bx, "Split", "profile_split", active=self._profile_split)
             bx = fbtn(bx, "CSV", "profile_csv")
+            bx = fbtn(bx, "NFW", "profile_nfw",
+                      active=self._nfw_fit is not None)
+            if self.brush_mask is not None:
+                bx = fbtn(bx, "BrushOnly", "brush_only",
+                          active=self.brush_only)
             draw.text((bx + 4, y + 1), caption, fill=DarkTheme.C_168_174_188_255,
                       font=self._font)
         elif self.mode == "phase":
@@ -1523,11 +1684,29 @@ class AnalysisDrawer(Panel):
             bx = fbtn(bx, "Y>", "phase_y", active=self._phase_custom is not None)
             bx = fbtn(bx, f"W:{wgt}", "phase_w")
             bx = fbtn(bx, "Save", "phase_save")
+            y += LH
+            self._panel_h_extra = LH
+            bx = M
+            bx = fbtn(bx, "Brush", "brush_toggle",
+                      active=self.brush_active)
+            bx = fbtn(bx, self.brush_kind[:4], "brush_kind")
+            if self.brush_kind == "polygon" and self.brush_points:
+                bx = fbtn(bx, "Close", "brush_close")
+            if self.brush_mask is not None:
+                bx = fbtn(bx, "Clear", "brush_clear")
+            bx = fbtn(bx, "Obs+", "obs_add")
+            if self.obs_datasets:
+                bx = fbtn(bx, "Obs-", "obs_clear")
+            bx = fbtn(bx, "tc/tff", "precip_line",
+                      active=self.show_precip_line)
+            bx = fbtn(bx, "Tvir", "tvir_line",
+                      active=self.tvir_K is not None)
         elif self.mode == "orbit":
             bx = M
             bx = fbtn(bx, "Compute", "orbit_compute")
             bx = fbtn(bx, "CSV", "orbit_csv")
             bx = fbtn(bx, "Stream", "orbit_stream")
+            bx = fbtn(bx, "galpy", "orbit_galpy")
         elif self.mode == "regions":
             bx = M
             bx = fbtn(bx, "Add", "rg_add")
@@ -1607,10 +1786,66 @@ class AnalysisDrawer(Panel):
             bx = fbtn(bx, "Halo", "stats_halo", active=self._show_halo)
             bx = fbtn(bx, "JSON", "stats_json")
             bx = fbtn(bx, "TeX", "stats_latex")
+            bx = fbtn(bx, "Clip", "stats_clip")
+            bx = fbtn(bx, "Diff", "stats_compare")
+            if self.brush_mask is not None:
+                bx = fbtn(bx, "BrushOnly", "brush_only",
+                          active=self.brush_only)
 
         self._panel_w, self._panel_h = tw, th
         self._panel_x, self._panel_y = self._panel_origin(tw, th)
         self._upload_panel(tw, th, img.tobytes())
+
+    def phase_click_to_data(self, lx, ly):
+        """Panel-local click -> phase data coords (or None outside the
+        axes box). Uses the fixed-fraction axes geometry recorded by
+        _render_phase plus the plot image's paste position."""
+        g = self._phase_geom
+        pi = getattr(self, "_plot_img_pos", None)
+        if g is None or pi is None:
+            return None
+        px = lx - pi[0]
+        py = ly - pi[1]
+        ax_x, ax_y, ax_w, ax_h = g["ax_px"]
+        if not (ax_x <= px <= ax_x + ax_w and ax_y <= py <= ax_y + ax_h):
+            return None
+        fx = (px - ax_x) / ax_w
+        fy = 1.0 - (py - ax_y) / ax_h
+        x0, x1 = g["xlim"]
+        y0, y1 = g["ylim"]
+        return (x0 + fx * (x1 - x0), y0 + fy * (y1 - y0))
+
+    def brush_click(self, lx, ly):
+        """Handle a click in brush mode; returns "submit" when a shape
+        is completed (rect/ellipse two-click), True when consumed."""
+        pt = self.phase_click_to_data(lx, ly)
+        if pt is None:
+            return False
+        self.brush_points.append(pt)
+        if self.brush_kind in ("rect", "ellipse") \
+                and len(self.brush_points) >= 2:
+            (xa, ya), (xb, yb) = self.brush_points[:2]
+            if self.brush_kind == "rect":
+                self.brush_shape = {"kind": "rect", "x0": xa, "x1": xb,
+                                    "y0": ya, "y1": yb}
+            else:
+                self.brush_shape = {"kind": "ellipse", "cx": xa,
+                                    "cy": ya, "rx": abs(xb - xa),
+                                    "ry": abs(yb - ya)}
+            self.brush_points = []
+            self.refresh()
+            return "submit"
+        self.refresh()
+        return True
+
+    def close_polygon(self):
+        if self.brush_kind == "polygon" and len(self.brush_points) >= 3:
+            self.brush_shape = {"kind": "polygon",
+                                "points": list(self.brush_points)}
+            self.brush_points = []
+            self.refresh()
+            return "submit"
+        return False
 
     def on_click(self, x, y):
         """Returns an action string handled by the app, True if consumed,
@@ -1620,6 +1855,11 @@ class AnalysisDrawer(Panel):
         lx, ly = x - self._panel_x, y - self._panel_y
         if lx < 0 or lx > self._panel_w or ly < 0 or ly > self._panel_h:
             return False
+        # Brush mode: clicks inside the phase plot place shape points.
+        if (self.mode == "phase" and self.brush_active):
+            r = self.brush_click(lx, ly)
+            if r:
+                return ("brush_submit" if r == "submit" else True)
         # Halo list: clicking a table row opens the inspector.
         if (self.mode == "halos" and self.catalog is not None
                 and getattr(self, "_halo_order", None)):
@@ -1726,9 +1966,32 @@ class AnalysisDrawer(Panel):
                     self._phase_custom[i] = fields[j]
                     self._last_key = None
                     return True
+                if action == "brush_toggle":
+                    self.brush_active = not self.brush_active
+                    self.brush_points = []
+                    self._last_key = None
+                    return True
+                if action == "brush_kind":
+                    kinds = ["rect", "polygon", "ellipse"]
+                    self.brush_kind = kinds[
+                        (kinds.index(self.brush_kind) + 1) % 3]
+                    self.brush_points = []
+                    self._last_key = None
+                    return True
+                if action == "brush_close":
+                    return ("brush_submit" if self.close_polygon()
+                            else True)
+                if action == "precip_line":
+                    self.show_precip_line = not self.show_precip_line
+                    self.refresh()
+                    return True
                 if action == "phase_w":
                     self._phase_weight_idx += 1
                     self._last_key = None
+                    return True
+                if action == "brush_only":
+                    self.brush_only = not self.brush_only
+                    self.refresh()
                     return True
                 if action == "stats_halo":
                     self._show_halo = not self._show_halo

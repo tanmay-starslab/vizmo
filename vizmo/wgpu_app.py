@@ -438,6 +438,43 @@ def run_wgpu_app(
     drawer.sightlines = _sightlines["list"]
     from .wgpu_renderer import HaloMarkerRenderer
 
+    from .wgpu_renderer import BrushHighlightRenderer
+
+    brush_overlay = BrushHighlightRenderer(device, present_format)
+    _brush_inset = {"img": None}
+
+    def _brush_submit():
+        from .analysis import (brush_inset_histogram,
+                               phase_selection_mask)
+
+        if drawer._last_phase is None or drawer.brush_shape is None:
+            toasts.show("Draw a brush shape first", "warn")
+            return
+        try:
+            mask = phase_selection_mask(data, drawer._last_phase,
+                                        drawer.brush_shape)
+        except Exception as e:
+            toasts.show(f"Brush failed: {e}", "error")
+            return
+        drawer.brush_mask = mask
+        n_sel = int(mask.sum())
+        brush_overlay.set_points(data.positions[mask])
+        _brush_inset["img"] = brush_inset_histogram(data, mask)
+        drawer.refresh()
+        toasts.show(
+            f"Brush: {n_sel / 1e6:.2f}M particles selected "
+            f"({100 * n_sel / max(data.n_particles, 1):.1f}% of total)",
+            "ok", duration=6.0)
+
+    def _brush_clear():
+        drawer.brush_mask = None
+        drawer.brush_shape = None
+        drawer.brush_points = []
+        drawer.brush_only = False
+        brush_overlay.clear()
+        _brush_inset["img"] = None
+        drawer.refresh()
+
     halo_markers = HaloMarkerRenderer(device, present_format)
     _halo_sel = {"id": None}
 
@@ -990,7 +1027,11 @@ def run_wgpu_app(
             if key == glfw.KEY_ESCAPE:
                 # Esc cancels aperture placement, then closes panels;
                 # quits only when nothing is in the way.
-                if welcome.enabled:
+                if drawer.brush_active or drawer.brush_mask is not None:
+                    drawer.brush_active = False
+                    _brush_clear()
+                    toasts.show("Brush cleared")
+                elif welcome.enabled:
                     welcome.enabled = False
                 elif menubar.on_escape():
                     pass
@@ -1324,6 +1365,17 @@ def run_wgpu_app(
                 toasts.show(
                     f"GPU profiler "
                     f"{'on' if profiler_panel.enabled else 'off'}")
+            elif key == glfw.KEY_P and (mods & glfw.MOD_SHIFT):
+                if drawer.mode != "phase":
+                    drawer.enabled = True
+                    drawer.mode = "phase"
+                drawer.brush_active = not drawer.brush_active
+                drawer.brush_points = []
+                drawer.refresh()
+                toasts.show(
+                    "Phase brush ON: click 2 corners (rect/ellipse) "
+                    "or vertices (polygon)" if drawer.brush_active
+                    else "Phase brush off", duration=5.0)
             elif key == glfw.KEY_F9:
                 vis = not scale_bar.enabled
                 scale_bar.enabled = vis
@@ -2037,6 +2089,200 @@ def run_wgpu_app(
                     _sightlines["list"].clear()
                     sightline_overlay.enabled = False
                     drawer.refresh()
+                elif dr_action == "brush_submit":
+                    _brush_submit()
+                elif dr_action == "brush_clear":
+                    _brush_clear()
+                elif dr_action == "obs_add":
+                    try:
+                        import csv as _csv
+                        import tkinter as tk
+                        from tkinter import filedialog
+
+                        root = tk.Tk()
+                        root.withdraw()
+                        sel = filedialog.askopenfilename(
+                            title="Observational CSV",
+                            filetypes=[("CSV", "*.csv")])
+                        root.destroy()
+                        if sel and drawer._last_phase is not None:
+                            ph = drawer._last_phase
+                            with open(sel) as fcsv:
+                                rdr = _csv.DictReader(fcsv)
+                                xs, ys, lbs = [], [], []
+                                for rrow in rdr:
+                                    xs.append(float(rrow[ph["xfield"]]))
+                                    ys.append(float(rrow[ph["yfield"]]))
+                                    lbs.append(rrow.get("label"))
+                            xs = np.asarray(xs)
+                            ys = np.asarray(ys)
+                            if ph["xlog"]:
+                                xs = np.log10(xs)
+                            if ph["ylog"]:
+                                ys = np.log10(ys)
+                            labels = (lbs if any(lbs) else None)
+                            drawer.obs_datasets.append(
+                                (os.path.basename(sel), xs, ys, labels))
+                            drawer.refresh()
+                            toasts.show(
+                                f"Obs data: {os.path.basename(sel)} "
+                                f"({len(xs)} points)", "ok")
+                    except Exception as e:
+                        toasts.show(f"Obs load failed: {e}", "error")
+                elif dr_action == "obs_clear":
+                    drawer.obs_datasets.clear()
+                    drawer.refresh()
+                elif dr_action == "tvir_line":
+                    if drawer.tvir_K is not None:
+                        drawer.tvir_K = None
+                    else:
+                        try:
+                            from .analysis import radial_profile
+                            from .physics import (BOLTZMANN_CGS,
+                                                  PROTONMASS_CGS)
+
+                            sc_c, sc_r = drawer._active_scope()
+                            rr, vc, _u = radial_profile(
+                                data, "RotationCurve", center=sc_c,
+                                r_max_kpc=sc_r)
+                            vmax = float(np.nanmax(vc)) * 1e5
+                            drawer.tvir_K = (0.6 * PROTONMASS_CGS
+                                             * vmax**2
+                                             / (2 * BOLTZMANN_CGS))
+                            toasts.show(
+                                f"T_vir = {drawer.tvir_K:.2e} K "
+                                f"(from v_c of loaded types)", "ok")
+                        except Exception as e:
+                            toasts.show(f"T_vir failed: {e}", "error")
+                    drawer.refresh()
+                elif dr_action == "profile_nfw":
+                    if drawer._nfw_fit is not None:
+                        drawer._nfw_fit = None
+                    elif drawer._last_profile is not None:
+                        from .analysis import fit_nfw_density_profile
+
+                        rr, prof, fld, _u = drawer._last_profile
+                        if fld != "Density":
+                            toasts.show(
+                                "NFW fit needs the Density profile",
+                                "warn")
+                        else:
+                            try:
+                                rho_s, r_s = fit_nfw_density_profile(
+                                    rr, np.asarray(prof))
+                                drawer._nfw_fit = (rho_s, r_s)
+                                toasts.show(
+                                    f"NFW: rho_s={rho_s:.2e} "
+                                    f"Msun/kpc^3, r_s={r_s:.1f} kpc",
+                                    "ok", duration=8.0)
+                            except Exception as e:
+                                toasts.show(f"NFW fit failed: {e}",
+                                            "error")
+                    drawer.refresh()
+                elif dr_action == "stats_clip":
+                    from .analysis import region_stats
+
+                    sc_c, sc_r = drawer._active_scope()
+                    rows, _ = region_stats(data, center=sc_c,
+                                           radius_kpc=sc_r)
+                    payload = repr(dict(rows))
+                    try:
+                        import pyperclip
+
+                        pyperclip.copy(payload)
+                        toasts.show("Stats copied to clipboard", "ok")
+                    except ImportError:
+                        print(payload)
+                        toasts.show(
+                            "Copied to terminal - pyperclip not "
+                            "installed", "warn")
+                elif dr_action == "stats_compare":
+                    from .analysis import region_stats
+
+                    sc_c, sc_r = drawer._active_scope()
+                    rows, _ = region_stats(data, center=sc_c,
+                                           radius_kpc=sc_r)
+                    prev = _state.get("_previous_stats")
+                    _state["_previous_stats"] = dict(rows)
+                    if prev is None:
+                        toasts.show(
+                            "Stats stored - press Diff again after "
+                            "changing aperture/snapshot", "info",
+                            duration=6.0)
+                    else:
+                        diffs = []
+                        for k, v in rows:
+                            if k in prev and k != "Particles":
+                                try:
+                                    a = float(str(v).split()[0]
+                                              .replace(",", ""))
+                                    b = float(str(prev[k]).split()[0]
+                                              .replace(",", ""))
+                                    if b != 0:
+                                        diffs.append(
+                                            f"{k}: "
+                                            f"{100 * (a - b) / b:+.1f}%")
+                                except ValueError:
+                                    pass
+                        toasts.show(" | ".join(diffs[:4]) or
+                                    "No comparable rows", "info",
+                                    duration=10.0)
+                elif dr_action == "orbit_galpy":
+                    if drawer._last_orbit is None:
+                        toasts.show("Compute an orbit first", "warn")
+                    else:
+                        try:
+                            from .orbit import (
+                                build_potential_from_snapshot)
+
+                            phi = build_potential_from_snapshot(
+                                data.positions, data.masses, units,
+                                center=_focus_center())
+                            o, props = drawer._last_orbit
+                            out = os.path.join(screenshot_dir or ".",
+                                               "orbit_to_galpy.py")
+                            lines = [
+                                "# Recreate a vizmo orbit in galpy "
+                                "(auto-generated).",
+                                "import numpy as np",
+                                "from galpy.potential import "
+                                "NFWPotential",
+                                "from galpy.orbit import Orbit",
+                                "from astropy import units as u",
+                                "",
+                                f"rho_s = {getattr(phi, 'rho_s', 0):.6e}"
+                                "  # Msun/kpc^3 (vizmo NFW fit)",
+                                f"r_s = {getattr(phi, 'r_s', 0):.4f}"
+                                "  # kpc",
+                                "amp = 4 * np.pi * rho_s * r_s**3 "
+                                "* u.Msun",
+                                "pot = NFWPotential(amp=amp, "
+                                "a=r_s * u.kpc)",
+                                f"x, y, z = {list(np.round(o['pos'][0], 4))}",
+                                f"vx, vy, vz = {list(np.round(o['vel'][0], 3))}",
+                                "orb = Orbit([x*u.kpc, vx*u.km/u.s, "
+                                "vy*u.km/u.s, z*u.kpc, vz*u.km/u.s, "
+                                "0*u.deg], ro=8.0, vo=220.0)",
+                                f"ts = np.linspace(0, "
+                                f"{float(o['t'][-1]):.3f}, "
+                                f"{len(o['t'])}) * u.Gyr",
+                                "orb.integrate(ts, pot)",
+                                "orb.plot()",
+                                "import matplotlib.pyplot as plt",
+                                "plt.savefig('orbit_galpy.png', "
+                                "dpi=150)",
+                                "print('apo:', orb.rap(), 'peri:', "
+                                "orb.rperi())",
+                            ]
+                            with open(out, "w") as fpy:
+                                fpy.write("\n".join(lines) + "\n")
+                            toasts.show(
+                                f"galpy script: "
+                                f"{os.path.basename(out)}", "ok",
+                                duration=8.0)
+                        except Exception as e:
+                            toasts.show(f"galpy export failed: {e}",
+                                        "error")
                 elif dr_action == "orbit_compute":
                     _compute_orbit(stream=False)
                 elif dr_action == "orbit_stream":
@@ -3894,6 +4140,9 @@ def run_wgpu_app(
                 if _stream["visible"] and stream_renderer.lines:
                     stream_renderer.write_uniforms(camera)
                     stream_renderer.render_to_pass(rpass)
+                if brush_overlay.n_points > 0:
+                    brush_overlay.write_uniforms(camera)
+                    brush_overlay.render_to_pass(rpass)
                 if halo_markers.n_vertices > 0:
                     halo_markers.write_uniforms(camera)
                     halo_markers.render_to_pass(rpass)
