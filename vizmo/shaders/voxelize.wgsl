@@ -10,7 +10,7 @@ struct VoxParams {
     n_grid: u32,
     n_particles: u32,
     fixed_scale: f32,
-    _pad: f32,
+    row_stride: f32,  // workgroups_x * 256 as f32 (2D dispatch)
 };
 
 @group(0) @binding(0) var<uniform> params: VoxParams;
@@ -20,7 +20,7 @@ struct VoxParams {
 
 @compute @workgroup_size(256)
 fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let i = gid.x;
+    let i = gid.y * u32(params.row_stride) + gid.x;
     if (i >= params.n_particles) { return; }
     let n = params.n_grid;
     let nf = f32(n);

@@ -5,7 +5,7 @@
 
 struct DerivedParams {
     n_particles: u32,
-    _pad0: u32,
+    row_stride: u32,  // gid.x range = workgroups_x * 256 (2D dispatch)
     unit_velocity2: f32,  // (UnitVelocity_in_cm_per_s)^2 incl. sqrt(a) factors
     unit_density: f32,    // code density -> g/cm^3 (incl. h^2/a^3)
 };
@@ -24,7 +24,7 @@ const K_B_CGS: f32 = 1.380649e-16;
 
 @compute @workgroup_size(256)
 fn main_derived_fields(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let i = gid.x;
+    let i = gid.y * params.row_stride + gid.x;
     if (i >= params.n_particles) { return; }
     let mu = 4.0 / (1.0 + 3.0 * X_H + 4.0 * X_H * xe[i]);
     let u_cgs = u_int[i] * params.unit_velocity2;

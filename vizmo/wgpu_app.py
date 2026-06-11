@@ -1326,6 +1326,8 @@ def run_wgpu_app(
             _state["_los_camera_pos"] = None
 
             mode = _state["_render_mode_name"]
+            for fname in (_state["_sd_field"], _state["_wa_data_field"]):
+                _ensure_gpu_derived(fname)
             _state["_composite"] = mode == "Composite"
 
             if mode == "Composite":
@@ -1925,6 +1927,43 @@ def run_wgpu_app(
         camera.on_mouse_button(button, action)
 
     _slice_drag = {"last_y": None}
+    _hover = {"tip": "", "t": 0.0}
+
+    _MODE_TIPS = {"SurfaceDensity": "Surface density projection",
+                  "WeightedAverage": "Mass-weighted line-of-sight average",
+                  "WeightedVariance": "LOS standard deviation (dispersion)",
+                  "Composite": "Dual-channel lightness x color",
+                  "slice": "Interactive slice plane (Shift+Z)",
+                  "isosurface": "Marching-cubes isosurfaces (Shift+I)",
+                  "streamlines": "RK4 velocity streamlines (Shift+V)",
+                  "volume": "Emission-absorption ray marching (Shift+W)"}
+
+    def _update_hover_tip(x, y):
+        # Status-bar tooltips (Section 6.E): mode icon row hover shows
+        # the full mode name; field-picker row hover shows the formula.
+        tip = ""
+        hit = user_menu._hit_test(x, y)
+        if (isinstance(hit, tuple) and len(hit) > 3
+                and hit[2] == "hbutton" and isinstance(hit[3], tuple)):
+            kind, val = hit[3]
+            if kind in ("set_mode", "tool"):
+                tip = _MODE_TIPS.get(val, val)
+        elif field_picker.enabled:
+            lx = x - field_picker._panel_x
+            ly = y - field_picker._panel_y
+            for x0, y0, x1, y1, action in field_picker._buttons:
+                if (x0 <= lx <= x1 and y0 <= ly <= y1
+                        and isinstance(action, tuple)
+                        and action[0] == "pick_field"):
+                    from .physics import DERIVED_FIELDS
+
+                    df = DERIVED_FIELDS.get(action[1])
+                    if df is not None:
+                        tip = f"{action[1]}: {df.description}"
+                    break
+        if tip != _hover["tip"]:
+            _hover["tip"] = tip
+            status_bar._last_key = None
 
     def cursor_callback(win, x, y):
         # Ctrl+LMB drag in slice mode: translate the plane along its
@@ -1943,6 +1982,11 @@ def run_wgpu_app(
             _slice_drag["last_y"] = y
             return
         _slice_drag["last_y"] = None
+        now_h = time.perf_counter()
+        if now_h - _hover["t"] > 0.1:  # 10 Hz throttle
+            _hover["t"] = now_h
+            fx, fy = _cursor_to_fb(win)
+            _update_hover_tip(fx, fy)
         camera.on_cursor(x, y)
 
     def scroll_callback(win, xoffset, yoffset):
@@ -2477,6 +2521,41 @@ def run_wgpu_app(
         except Exception as e:
             toasts.show(f"Export failed: {e}", "error")
 
+    def _ensure_gpu_derived(name):
+        # Renderer GPU-buffer bypass: compute Temperature/NumberDensity
+        # via derived_fields.wgsl and inject into the data cache under
+        # the exact derived-field keys, so every consumer (weights,
+        # profiles, phase, filters) reads the GPU result and the CPU
+        # physics path is skipped. Failures fall back silently (one
+        # warning toast).
+        if name not in ("Temperature", "NumberDensity"):
+            return
+        key = f"derived/{name}/{tuple(data.particle_types)}"
+        if key in data._cache or gpu_compute is None:
+            return
+        raw = set(data.available_fields())
+        if not {"InternalEnergy", "Density"} <= raw:
+            return
+        try:
+            u = data.get_field("InternalEnergy")
+            xe = (data.get_field("ElectronAbundance")
+                  if "ElectronAbundance" in raw
+                  else np.full(data.n_particles, 1.158, dtype=np.float32))
+            rho = data.get_field("Density")
+            t_gpu, nh_gpu = gpu_compute.compute_derived_fields(
+                u, xe, rho, units)
+            tkey = f"derived/Temperature/{tuple(data.particle_types)}"
+            nkey = f"derived/NumberDensity/{tuple(data.particle_types)}"
+            data._cache[tkey] = t_gpu
+            data._cache[nkey] = nh_gpu
+            print("  [gpu] derived fields computed on GPU")
+        except Exception as e:
+            print(f"  [gpu] derived-field bypass failed: {e}")
+            if not _state.get("_gpu_derived_warned"):
+                _state["_gpu_derived_warned"] = True
+                toasts.show(f"GPU derived fields unavailable ({e}); "
+                            f"CPU fallback", "warn")
+
     def _dispatch_menu_action(action):
         """Map MenuBar action strings onto the existing handlers."""
         import os as _os
@@ -2903,6 +2982,7 @@ def run_wgpu_app(
 
         # Camera movement
         moved = camera.update(dt)
+        volume_renderer.lod_motion = bool(moved)
         # Per-particle LOS depends on camera position only, not on
         # orientation, so detect translation separately from rotation.
         translated = bool(np.any(camera.position != prev_camera_pos))
@@ -3276,7 +3356,8 @@ def run_wgpu_app(
                     if _state["_render_mode_name"] in ("WeightedAverage", "WeightedVariance")
                     else _state["_sd_field"]
                 )
-                status_bar.update(camera, units, view_center, active_field,
+                status_bar.update(camera, units, view_center,
+                                  _hover["tip"] or active_field,
                                   renderer.n_particles, renderer.n_total)
                 gizmo.update(camera)
                 toasts.update()

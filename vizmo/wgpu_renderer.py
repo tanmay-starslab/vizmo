@@ -3299,6 +3299,10 @@ class VolumeRenderer:
         self.mode = 0          # 0 = emission-absorption, 1 = MIP
         self.step_mult = 1.0
         self.max_steps = 512
+        # Motion LOD (5.E.8): app sets lod_motion while the camera
+        # moves; the marcher doubles its step + halves max_steps,
+        # restoring full quality on idle.
+        self.lod_motion = False
         self.res = 128
         self.vmin = 0.0
         self.vmax = 1.0
@@ -3380,6 +3384,9 @@ class VolumeRenderer:
         n = len(pos)
         pos4 = np.zeros((n, 4), dtype=np.float32)
         pos4[:, :3] = pos
+        n_groups = (n + 255) // 256
+        gx = min(n_groups, 32768)
+        gy = (n_groups + gx - 1) // gx
         params = np.zeros(8, dtype=np.float32)
         params[0:3] = center
         params[3] = half_size
@@ -3389,6 +3396,7 @@ class VolumeRenderer:
         # far below u32 overflow per voxel.
         scale = VOXELIZE_FIXED_SCALE / max(float(mass.max()), 1e-30)
         params[6] = scale
+        params[7] = float(gx * 256)  # row stride (2D dispatch)
         pbuf = dev.create_buffer_with_data(
             data=params.tobytes(), usage=wgpu.BufferUsage.UNIFORM)
         posb = dev.create_buffer_with_data(
@@ -3407,7 +3415,7 @@ class VolumeRenderer:
         cp = enc.begin_compute_pass()
         cp.set_pipeline(self._vox_pipeline)
         cp.set_bind_group(0, bg)
-        cp.dispatch_workgroups((n + 255) // 256)
+        cp.dispatch_workgroups(gx, gy)
         cp.end()
         dev.queue.submit([enc.finish()])
         raw = dev.queue.read_buffer(outb)
@@ -3534,7 +3542,7 @@ class VolumeRenderer:
         buf[4:7] = camera.forward
         buf[7] = camera.aspect
         buf[8:11] = camera.right
-        buf[11] = self.step_mult
+        buf[11] = self.step_mult * (2.0 if self.lod_motion else 1.0)
         buf[12:15] = camera.up
         buf[15] = self.vmin
         buf[16:19] = self.center
@@ -3542,7 +3550,8 @@ class VolumeRenderer:
         buf[20] = self.half_size
         buf[21] = float(self._tex3d_res)
         buf.view(np.uint32)[22] = self.mode
-        buf.view(np.uint32)[23] = self.max_steps
+        buf.view(np.uint32)[23] = (self.max_steps // 2
+                                   if self.lod_motion else self.max_steps)
         self.device.queue.write_buffer(self._ubuf, 0, buf.tobytes())
         rpass.set_pipeline(self._pipeline)
         rpass.set_bind_group(0, self._bg)

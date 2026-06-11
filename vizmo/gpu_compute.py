@@ -286,8 +286,12 @@ class GPUCompute:
         xe = np.ascontiguousarray(electron_abundance, dtype=np.float32)
         rho = np.ascontiguousarray(density, dtype=np.float32)
         n = len(u)
+        n_groups = (n + 255) // 256
+        gx = min(n_groups, 32768)
+        gy = (n_groups + gx - 1) // gx
         params = np.zeros(4, dtype=np.float32)
         params.view(np.uint32)[0] = n
+        params.view(np.uint32)[1] = gx * 256  # row stride (2D dispatch)
         params[2] = (unit_system.unit_velocity_cgs ** 2
                      * unit_system.a)  # u_to_cgs incl. sqrt(a)^2
         params[3] = unit_system.density_to_cgs
@@ -314,7 +318,7 @@ class GPUCompute:
         cp = enc.begin_compute_pass()
         cp.set_pipeline(self._derived_pipeline)
         cp.set_bind_group(0, bg)
-        cp.dispatch_workgroups((n + 255) // 256)
+        cp.dispatch_workgroups(gx, gy)
         cp.end()
         dev.queue.submit([enc.finish()])
         temp = np.frombuffer(dev.queue.read_buffer(out_t),
