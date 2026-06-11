@@ -1843,6 +1843,20 @@ class FieldPickerPanel(Panel):
                     break
                 draw.text((M + 16, y), n, fill=s.text_color,
                           font=self._font)
+                # Formula/description tooltip for derived fields,
+                # right-aligned and dimmed (Section 6.F).
+                from .physics import DERIVED_FIELDS
+
+                df = DERIVED_FIELDS.get(n)
+                if df is not None:
+                    desc = df.description
+                    if len(desc) > 30:
+                        desc = desc[:29] + "…"
+                    dummy2 = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
+                    bb = dummy2.textbbox((0, 0), desc, font=self._font)
+                    draw.text((tw - M - (bb[2] - bb[0]), y), desc,
+                              fill=DarkTheme.TEXT_DISABLED,
+                              font=self._font)
                 self._buttons.append((M, y, tw - M, y + LH,
                                       ("pick_field", n)))
                 y += LH
