@@ -1142,9 +1142,23 @@ class SnapshotData:
         # half of system free memory if psutil is available, else 16 GB.
         self._cache_budget = self._default_cache_budget()
 
+        # Async-load bookkeeping (Item 1): the GUI polls these while a
+        # load is in flight. set_particle_types drives the progress.
+        self.is_loaded = False
+        self.load_progress = 0.0
+        self.load_status = ""
+        # Per-field background computation futures (get_field_async).
+        from concurrent.futures import ThreadPoolExecutor
+
+        self._field_executor = ThreadPoolExecutor(max_workers=2)
+        self._field_futures = {}
+
         self._load_stars()
         self._hsml_progress = hsml_progress
         self.set_particle_types(particle_types)
+        self.is_loaded = True
+        self.load_progress = 1.0
+        self.load_status = "ready" 
 
     @staticmethod
     def _default_cache_budget():
@@ -1394,7 +1408,10 @@ class SnapshotData:
         slices = {}
         offset = 0
         try:
-            for p in self.particle_types:
+            n_types = max(len(self.particle_types), 1)
+            for i_type, p in enumerate(self.particle_types):
+                self.load_status = f"Reading PartType{p}..."
+                self.load_progress = i_type / n_types
                 # Make room before pulling this ptype off disk if it's not
                 # already cached. Selected ptypes (including this one) are
                 # protected from eviction.
@@ -1428,6 +1445,8 @@ class SnapshotData:
         )
         self.n_particles = offset
         self._type_slices = slices
+        self.load_progress = 1.0
+        self.load_status = "ready"
 
     def _resolve_hsml(self, ptype, pos):
         """Get smoothing lengths for `ptype`, with header softening + meshoid fallbacks."""
@@ -1730,6 +1749,29 @@ class SnapshotData:
             self._cache[key] = out
             return out
         return self._get_field_concat(name)
+
+    def get_field_async(self, name):
+        """Non-blocking field access (Item 1).
+
+        Returns the array when ready, else None — the caller keeps
+        rendering the previous field. Computation runs once in the
+        shared 2-worker thread pool; completion is observable via
+        field_ready().
+        """
+        from concurrent.futures import Future
+
+        fut = self._field_futures.get(name)
+        if fut is None:
+            fut = self._field_executor.submit(self.get_field, name)
+            self._field_futures[name] = fut
+        if fut.done():
+            return fut.result()
+        return None
+
+    def field_ready(self, name):
+        """True when a get_field_async() computation has finished."""
+        fut = self._field_futures.get(name)
+        return fut is not None and fut.done()
 
     def get_vector_field(self, name):
         """Load a vector (N,3) field across all selected particle types."""

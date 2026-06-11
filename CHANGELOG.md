@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.7.1 — 2026-06-10
+
+### Performance infrastructure
+- vizmo/fast_ops.py: numba-parallel kernel interpolation, LOS column
+  density (kernel-column table interp), and radial-profile binning
+  with pure-numpy fallbacks; equivalence-tested to 1e-8..1e-10.
+- shaders/derived_fields.wgsl + GPUCompute.compute_derived_fields():
+  Temperature and n_H computed on the GPU, verified against the CPU
+  physics to 2e-4 on Metal.
+- DataManager async-load API: is_loaded / load_progress /
+  load_status markers and get_field_async()/field_ready() per-field
+  background futures (2-worker pool).
+
+### Not included (deferred)
+- Non-blocking startup with loading screen, renderer GPU-buffer
+  bypass for derived fields, GPU timestamp profiling overlay (F10),
+  memory overlay, spectro/analysis rewiring onto fast_ops.
+
 ## 0.7.0 — 2026-06-10
 
 ### Added

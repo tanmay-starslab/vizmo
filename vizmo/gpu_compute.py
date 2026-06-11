@@ -239,3 +239,89 @@ class GPUCompute:
         # GPUBuffer release happens automatically on garbage collection;
         # nothing to explicitly free here.
         pass
+
+    # -- GPU-side derived fields (Item 2) -----------------------------------
+
+    def compute_derived_fields(self, internal_energy, electron_abundance,
+                               density, unit_system):
+        """Compute Temperature [K] and n_H [cm^-3] on the GPU.
+
+        Dispatches shaders/derived_fields.wgsl over the particle
+        arrays and reads the results back as float32 numpy arrays
+        (also cached on self.gpu_temperature_buffer /
+        self.gpu_number_density_buffer with self.derived_fields_gpu
+        set). Raises on any GPU failure — the caller falls back to
+        the CPU physics.py path with a warning.
+
+        The math matches physics._temperature exactly for the
+        X_H = 0.76 case (no GFM_Metals hydrogen-fraction override).
+        """
+        import numpy as np
+        import wgpu
+        from pathlib import Path
+
+        dev = self.device
+        shader_src = (Path(__file__).parent / "shaders"
+                      / "derived_fields.wgsl").read_text()
+        if getattr(self, "_derived_pipeline", None) is None:
+            shader = dev.create_shader_module(code=shader_src)
+            self._derived_bgl = dev.create_bind_group_layout(entries=[
+                {"binding": 0, "visibility": wgpu.ShaderStage.COMPUTE,
+                 "buffer": {"type": "uniform"}},
+                *[{"binding": b, "visibility": wgpu.ShaderStage.COMPUTE,
+                   "buffer": {"type": "read-only-storage"}}
+                  for b in (1, 2, 3)],
+                *[{"binding": b, "visibility": wgpu.ShaderStage.COMPUTE,
+                   "buffer": {"type": "storage"}}
+                  for b in (4, 5)],
+            ])
+            layout = dev.create_pipeline_layout(
+                bind_group_layouts=[self._derived_bgl])
+            self._derived_pipeline = dev.create_compute_pipeline(
+                layout=layout,
+                compute={"module": shader,
+                         "entry_point": "main_derived_fields"})
+
+        u = np.ascontiguousarray(internal_energy, dtype=np.float32)
+        xe = np.ascontiguousarray(electron_abundance, dtype=np.float32)
+        rho = np.ascontiguousarray(density, dtype=np.float32)
+        n = len(u)
+        params = np.zeros(4, dtype=np.float32)
+        params.view(np.uint32)[0] = n
+        params[2] = (unit_system.unit_velocity_cgs ** 2
+                     * unit_system.a)  # u_to_cgs incl. sqrt(a)^2
+        params[3] = unit_system.density_to_cgs
+
+        pbuf = dev.create_buffer_with_data(
+            data=params.tobytes(), usage=wgpu.BufferUsage.UNIFORM)
+        bufs = [dev.create_buffer_with_data(
+            data=a.tobytes(), usage=wgpu.BufferUsage.STORAGE)
+            for a in (u, xe, rho)]
+        out_t = dev.create_buffer(
+            size=n * 4, usage=(wgpu.BufferUsage.STORAGE
+                               | wgpu.BufferUsage.COPY_SRC))
+        out_n = dev.create_buffer(
+            size=n * 4, usage=(wgpu.BufferUsage.STORAGE
+                               | wgpu.BufferUsage.COPY_SRC))
+        bg = dev.create_bind_group(
+            layout=self._derived_bgl,
+            entries=[{"binding": 0, "resource": {"buffer": pbuf}}]
+            + [{"binding": i + 1, "resource": {"buffer": b}}
+               for i, b in enumerate(bufs)]
+            + [{"binding": 4, "resource": {"buffer": out_t}},
+               {"binding": 5, "resource": {"buffer": out_n}}])
+        enc = dev.create_command_encoder()
+        cp = enc.begin_compute_pass()
+        cp.set_pipeline(self._derived_pipeline)
+        cp.set_bind_group(0, bg)
+        cp.dispatch_workgroups((n + 255) // 256)
+        cp.end()
+        dev.queue.submit([enc.finish()])
+        temp = np.frombuffer(dev.queue.read_buffer(out_t),
+                             dtype=np.float32).copy()
+        nh = np.frombuffer(dev.queue.read_buffer(out_n),
+                           dtype=np.float32).copy()
+        self.gpu_temperature_buffer = out_t
+        self.gpu_number_density_buffer = out_n
+        self.derived_fields_gpu = True
+        return temp, nh
