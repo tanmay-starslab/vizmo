@@ -694,6 +694,15 @@ class AnalysisDrawer(Panel):
         self._last_phase = None         # phase dict
         self._last_ps = None            # power spectrum dict
         self._last_orbit = None         # (orbit_result, props) from orbit.py
+        # Halo list / inspector state (Section 4.G).
+        self.catalog = None             # dict from catalog.load_catalog
+        self._halo_sort = ("M_halo", True)   # column, descending
+        self._halo_filter_idx = 0
+        self._halo_threshold = 10.0          # log10 Msun marker cut
+        self._halo_selected = None           # catalog row index
+        # Spectrum viewer state (Section 3.D).
+        self._spec_compare = False
+        self._spec_ion = None
 
     # -- filters helpers -----------------------------------------------------
 
@@ -852,6 +861,20 @@ class AnalysisDrawer(Panel):
                 self._cache[key] = self._render_orbit(o, props, scale)
             return self._cache[key], ""
 
+        if self.mode == "specview":
+            sls = [s for s in getattr(self, "sightlines", [])
+                   if s.trident_spectrum_path
+                   and __import__("os").path.exists(
+                       s.trident_spectrum_path)]
+            if not sls:
+                return None, ""
+            key = ("specview", tuple(s.label for s in sls),
+                   self._spec_compare)
+            if key not in self._cache:
+                self._cache[key] = self._render_spectra(
+                    sls if self._spec_compare else sls[-1:], scale)
+            return self._cache[key], f"{len(sls)} spectra"
+
         if self.mode == "spectrum":
             key = ("spectrum", data.n_particles, sc_key)
             if key not in self._cache:
@@ -974,6 +997,37 @@ class AnalysisDrawer(Panel):
         for ax in (ax1, ax2):
             _dark_axes(fig, ax)
         fig.tight_layout(pad=1.0)
+        return _fig_to_image(fig)
+
+    def _render_spectra(self, sightlines, scale):
+        """Flux vs wavelength for one (or, in Compare mode, several)
+        Trident spectra: continuum dashes at 1.0, absorption troughs
+        (flux < 0.9) shaded, distinct color per sightline."""
+        from matplotlib.figure import Figure
+
+        from .spectro import load_spectrum, compare_color
+
+        fig = Figure(figsize=(4.7 * scale, 3.4 * scale), dpi=100)
+        ax = fig.add_subplot(111)
+        for k, sl in enumerate(sightlines):
+            try:
+                w, flux = load_spectrum(sl.trident_spectrum_path)
+            except Exception:
+                continue
+            c = compare_color(k)
+            ax.plot(w, flux, lw=1.0, color=c, label=sl.label)
+            ax.fill_between(w, flux, 1.0, where=flux < 0.9,
+                            color=c, alpha=0.25, linewidth=0)
+        ax.axhline(1.0, ls="--", lw=0.8, color=(0.7, 0.72, 0.78))
+        ax.set_ylim(0, 1.2)
+        ax.set_xlabel("wavelength [A]", fontsize=9)
+        ax.set_ylabel("F / F_continuum", fontsize=9)
+        if len(sightlines) > 1:
+            leg = ax.legend(fontsize=7, framealpha=0.2,
+                            labelcolor="white")
+            leg.get_frame().set_facecolor((0.1, 0.12, 0.18))
+        _dark_axes(fig, ax)
+        fig.tight_layout(pad=1.1)
         return _fig_to_image(fig)
 
     def _render_spectrum(self, ps, scale):
@@ -1111,12 +1165,16 @@ class AnalysisDrawer(Panel):
                   "isosurface": "Isosurface",
                   "streamlines": "Streamlines",
                   "volume": "Volume rendering",
-                  "regions": "Regions (boolean)"}
+                  "regions": "Regions (boolean)",
+                  "halos": "Halo list",
+                  "haloinspect": "Halo inspector",
+                  "specview": "Spectrum viewer"}
         title = titles.get(self.mode, "")
 
         plot_img, caption = (None, "")
         rows = []
-        if self.mode in ("phase", "profile", "spectrum", "orbit"):
+        if self.mode in ("phase", "profile", "spectrum", "orbit",
+                         "specview"):
             plot_img, caption = self._content_image(data)
             if self.mode == "orbit" and plot_img is None:
                 rows = [("No orbit yet", "Shift+click a particle,"),
@@ -1210,6 +1268,63 @@ class AnalysisDrawer(Panel):
                     ("Backend", "GPU" if st.get("used_gpu") else "CPU"),
                     ("Drag", "Ctrl+drag moves along normal"),
                 ]
+        elif self.mode == "halos":
+            from .catalog import (apply_halo_filter, parse_halo_filter,
+                                  mass_threshold_mask, sort_halo_indices)
+
+            if self.catalog is None or not len(self.catalog["halo_id"]):
+                rows = [("No catalog", "launch with --catalog FILE")]
+            else:
+                cat = self.catalog
+                presets = [None, "M_halo>1e12", "type=0"]
+                ftxt = presets[self._halo_filter_idx % len(presets)]
+                mask = (apply_halo_filter(cat, parse_halo_filter(ftxt))
+                        & mass_threshold_mask(cat, self._halo_threshold))
+                col, desc = self._halo_sort
+                order = [i for i in sort_halo_indices(cat, col, desc)
+                         if mask[i]][:20]
+                self._halo_order = order
+                arrow = "v" if desc else "^"
+                rows = [(f"sort {col}{arrow}  filt "
+                         f"{ftxt or 'none'}",
+                         f"M>1e{self._halo_threshold:.0f}")]
+                for i in order:
+                    t = "C" if cat["type"][i] == 0 else "S"
+                    rows.append(
+                        (f"#{int(cat['halo_id'][i])} [{t}] "
+                         f"logM={np.log10(max(cat['M_halo'][i], 1)):.1f}",
+                         f"R200={cat['R_200'][i]:,.0f}"))
+        elif self.mode == "haloinspect":
+            cat = self.catalog
+            i = self._halo_selected
+            if cat is None or i is None:
+                rows = [("No halo selected", "pick from the list")]
+            else:
+                kind = ("CENTRAL" if cat["type"][i] == 0
+                        else "SATELLITE")
+                rows = [
+                    (f"Halo #{int(cat['halo_id'][i])}", kind),
+                    ("M_halo", f"{cat['M_halo'][i]:.3e} Msun"),
+                    ("M_star", f"{cat['M_star'][i]:.3e} Msun"),
+                    ("SFR", f"{cat['SFR'][i]:.3g} Msun/yr"),
+                    ("R_200", f"{cat['R_200'][i]:,.1f} kpc"),
+                ]
+        elif self.mode == "specview":
+            sls = getattr(self, "sightlines", [])
+            if not sls:
+                rows = [("No sightlines", "Shift+A to place one")]
+            else:
+                rows = []
+                for s in sls[-3:]:
+                    rows.append((s.label, f"b={s.impact_b_kpc:.0f} kpc"
+                                 if s.impact_b_kpc is not None else ""))
+                    if s.NHI and s.NHI > 0:
+                        rows.append(("  log N(HI) fast",
+                                     f"{np.log10(s.NHI):.2f} cm^-2"))
+                    if (s.trident_spectrum_path
+                            and __import__("os").path.exists(
+                                s.trident_spectrum_path)):
+                        rows.append(("  Trident", "spectrum on disk"))
         elif self.mode == "sightline":
             sls = getattr(self, "sightlines", [])
             if not sls:
@@ -1439,9 +1554,27 @@ class AnalysisDrawer(Panel):
             bx = fbtn(bx, "Op-", "slice_op_down")
             bx = fbtn(bx, "Op+", "slice_op_up")
             bx = fbtn(bx, "Res", "slice_res")
+        elif self.mode == "halos":
+            bx = M
+            bx = fbtn(bx, "Sort", "halo_sort")
+            bx = fbtn(bx, "Filt", "halo_filter")
+            bx = fbtn(bx, "T-", "halo_thr_down")
+            bx = fbtn(bx, "T+", "halo_thr_up")
+            bx = fbtn(bx, "CSV", "halo_csv")
+        elif self.mode == "haloinspect":
+            bx = M
+            bx = fbtn(bx, "Fly to", "halo_fly")
+            bx = fbtn(bx, "Set aperture", "halo_aperture")
+            bx = fbtn(bx, "Profile", "halo_profile")
+            bx = fbtn(bx, "Back", "halo_back")
+        elif self.mode == "specview":
+            bx = M
+            bx = fbtn(bx, "Compare", "spec_compare",
+                      active=self._spec_compare)
         elif self.mode == "sightline":
             bx = M
             bx = fbtn(bx, "CSV", "sightline_csv")
+            bx = fbtn(bx, "View", "spec_open")
             bx = fbtn(bx, "Trident", "sightline_trident")
             bx = fbtn(bx, "Clear", "sightline_clear")
         elif self.mode == "spectrum":
@@ -1469,6 +1602,20 @@ class AnalysisDrawer(Panel):
         lx, ly = x - self._panel_x, y - self._panel_y
         if lx < 0 or lx > self._panel_w or ly < 0 or ly > self._panel_h:
             return False
+        # Halo list: clicking a table row opens the inspector.
+        if (self.mode == "halos" and self.catalog is not None
+                and getattr(self, "_halo_order", None)):
+            LH = self.style.line_height
+            header_h = LH + 10
+            row0 = header_h + 4 + LH  # skip the sort/filter status row
+            idx = int((ly - row0) // LH)
+            if 0 <= idx < len(self._halo_order) and ly >= row0:
+                in_footer = ly > self._panel_h - LH - 8
+                if not in_footer:
+                    self._halo_selected = int(self._halo_order[idx])
+                    self.mode = "haloinspect"
+                    self._last_key = None
+                    return True
         for x0, y0, x1, y1, action in self._buttons:
             if x0 <= lx <= x1 and y0 <= ly <= y1:
                 if action == "close":
@@ -1501,6 +1648,43 @@ class AnalysisDrawer(Panel):
                     self._stats_radius_kpc = (self._stats_radius_kpc or 100.0) * 2.0
                     if self.scope is not None and self.use_scope:
                         self.scope["radius_kpc"] *= 2.0
+                    self.refresh()
+                    return True
+                if (self.mode == "halos"
+                        and isinstance(action, str)
+                        and action == "close"):
+                    pass  # fall through to standard close below
+                if action == "halo_sort":
+                    cols = ["M_halo", "M_star", "R_200", "halo_id"]
+                    col, desc = self._halo_sort
+                    if desc:
+                        self._halo_sort = (col, False)
+                    else:
+                        self._halo_sort = (
+                            cols[(cols.index(col) + 1) % len(cols)], True)
+                    self._last_key = None
+                    return True
+                if action == "halo_filter":
+                    self._halo_filter_idx += 1
+                    self._last_key = None
+                    return True
+                if action in ("halo_thr_down", "halo_thr_up"):
+                    self._halo_threshold = float(np.clip(
+                        self._halo_threshold
+                        + (0.5 if action == "halo_thr_up" else -0.5),
+                        10.0, 14.0))
+                    self._last_key = None
+                    return True
+                if action == "halo_back":
+                    self.mode = "halos"
+                    self._last_key = None
+                    return True
+                if action == "spec_compare":
+                    self._spec_compare = not self._spec_compare
+                    self.refresh()
+                    return True
+                if action == "spec_open":
+                    self.mode = "specview"
                     self.refresh()
                     return True
                 if action == "toggle_scope":

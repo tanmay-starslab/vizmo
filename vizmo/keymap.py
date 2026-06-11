@@ -57,5 +57,6 @@ KEYBINDINGS = [
     ("Left / Right", "Previous / next snapshot (--series)"),
     ("Ctrl+O / Ctrl+Q", "Open file dialog / quit"),
     ("Ctrl+Shift+D", "Toggle the right analysis dock"),
+    ("Ctrl+H", "Halo list (requires --catalog)"),
     ("Esc", "Quit"),
 ]

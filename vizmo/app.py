@@ -5,7 +5,9 @@ import argparse
 
 def main():
     parser = argparse.ArgumentParser(description="vizmo - Real-time mesh-free data explorer")
-    parser.add_argument("snapshot", help="Path to HDF5 snapshot file")
+    parser.add_argument("snapshot", nargs="?", default=None,
+                        help="Path to HDF5 snapshot file "
+                        "(omit for the welcome chooser)")
     parser.add_argument("--width", type=int, default=1920, help="Window width")
     parser.add_argument("--height", type=int, default=1080, help="Window height")
     parser.add_argument("--fov", type=float, default=90.0, help="Field of view in degrees")
@@ -108,7 +110,50 @@ def main():
         metavar="OUT",
         help="Profile the whole run with cProfile and dump " "stats to OUT (.pstats). View with snakeviz.",
     )
+    parser.add_argument(
+        "--catalog",
+        type=str,
+        default=None,
+        metavar="GROUPCAT",
+        help="Subfind/Rockstar halo catalog to overlay (Ctrl+H list)",
+    )
     args = parser.parse_args()
+
+    if args.snapshot is None:
+        # Welcome flow (Section 6.J, chooser form): recents + dialog.
+        import platform
+        import sys
+
+        from .recentfiles import RecentFiles
+
+        print("vizmo — real-time simulation explorer")
+        print(f"  python {platform.python_version()}")
+        recents = RecentFiles().get()
+        if recents:
+            print("  Recent files:")
+            for p_ in recents[:10]:
+                print(f"    {p_}")
+        else:
+            print("  No recent files.")
+        print("  Quickstart: vizmo snapshot.hdf5 | Shift+Z slice | "
+              "M aperture")
+        try:
+            import tkinter as tk
+            from tkinter import filedialog
+
+            root = tk.Tk()
+            root.withdraw()
+            sel = filedialog.askopenfilename(
+                title="Open simulation snapshot",
+                filetypes=[("HDF5 files", "*.hdf5 *.h5"),
+                           ("All files", "*")])
+            root.destroy()
+        except Exception as e:
+            print(f"  File dialog unavailable: {e}")
+            sel = None
+        if not sel:
+            sys.exit(0)
+        args.snapshot = sel
 
     types = None
     if args.types:
@@ -148,6 +193,7 @@ def main():
                 filters=args.filter,
                 series=args.series,
                 split_snapshot=args.split,
+                catalog=args.catalog,
             )
         finally:
             pr.disable()
@@ -177,6 +223,7 @@ def main():
             filters=args.filter,
             series=args.series,
             split_snapshot=args.split,
+            catalog=args.catalog,
         )
 
 

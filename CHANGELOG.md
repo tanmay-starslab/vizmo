@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.8.0 — 2026-06-10
+
+### Added
+- Halo list + inspector (Ctrl+H, --catalog GROUPCAT): sortable
+  (M_halo/M_star/R_200/id, asc/desc cycling), range-filter syntax
+  (M_halo>1e12 / bare halo id), 10^10–10^14 marker mass threshold,
+  CSV export; inspector with CENTRAL/SATELLITE badge and Fly-to /
+  Set-aperture(R_200) / Profile actions wired to the camera,
+  aperture, and profile machinery.
+- Spectrum viewer (sightline panel > View): Trident .h5/.fits
+  parsing, continuum dashes, absorption-trough shading, Compare mode
+  overlaying all sightlines in distinct cycling colors, fast-N
+  readouts alongside; VoigtFit component-line parser shipped+tested.
+- Welcome chooser: `vizmo` with no arguments prints recents +
+  quickstart and opens the file dialog (Section 6.J chooser form).
+
+### Deferred
+- 3D halo cross-hair markers + 12px click pick (needs a line_list
+  renderer pass), VoigtFit subprocess launch + overlay rendering,
+  spectrum Save-PDF, full-canvas welcome splash overlay, drag-drop.
+
 ## 0.7.1 — 2026-06-10
 
 ### Performance infrastructure

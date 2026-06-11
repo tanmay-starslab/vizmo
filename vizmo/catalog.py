@@ -118,3 +118,81 @@ def _load_rockstar(path: str, unit_system=None) -> dict:
         "type": np.where(col("pid", default=-1) < 0, 0, 1).astype(np.int64),
         "halo_id": col("id", default=-1).astype(np.int64),
     }
+
+
+# ---------------------------------------------------------------------------
+# Halo-list model (Section 4.G): filtering, sorting, threshold masks
+# ---------------------------------------------------------------------------
+
+import re as _re
+
+HALO_COLUMNS = ["halo_id", "type", "M_halo", "M_star", "SFR", "R_200"]
+_FILTER_RE = _re.compile(
+    r"^\s*(\w+)\s*(>=|<=|>|<|=)\s*([0-9.eE+-]+)\s*$")
+
+
+def parse_halo_filter(text: str):
+    """Parse 'M_halo>1e12' style filters -> (field, op, value) or a
+    bare integer halo id -> ('halo_id', '=', id). None when empty or
+    unparseable."""
+    text = (text or "").strip()
+    if not text:
+        return None
+    if text.isdigit():
+        return ("halo_id", "=", float(text))
+    m = _FILTER_RE.match(text)
+    if not m:
+        return None
+    field, op, val = m.group(1), m.group(2), float(m.group(3))
+    return (field, op, val) if field in HALO_COLUMNS else None
+
+
+def apply_halo_filter(cat: dict, parsed):
+    """Boolean mask over catalog rows for a parsed filter (all-True
+    when parsed is None)."""
+    import numpy as np
+
+    n = len(cat["halo_id"])
+    if parsed is None:
+        return np.ones(n, dtype=bool)
+    field, op, val = parsed
+    col = np.asarray(cat[field], dtype=np.float64)
+    return {">": col > val, ">=": col >= val, "<": col < val,
+            "<=": col <= val, "=": col == val}[op]
+
+
+def mass_threshold_mask(cat: dict, log10_threshold: float):
+    """Markers visible only above 10^threshold Msun (Section 4.F)."""
+    import numpy as np
+
+    return np.asarray(cat["M_halo"], dtype=np.float64) > 10.0**log10_threshold
+
+
+def sort_halo_indices(cat: dict, column: str, descending: bool):
+    """Row order for the table sort (stable argsort)."""
+    import numpy as np
+
+    col = np.asarray(cat[column], dtype=np.float64)
+    order = np.argsort(col, kind="stable")
+    return order[::-1] if descending else order
+
+
+def halos_to_csv(path: str, cat: dict, mask=None) -> str:
+    import csv
+
+    import numpy as np
+
+    if mask is None:
+        mask = np.ones(len(cat["halo_id"]), dtype=bool)
+    idx = np.flatnonzero(mask)
+    with open(path, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(HALO_COLUMNS + ["x_kpc", "y_kpc", "z_kpc"])
+        for i in idx:
+            w.writerow([int(cat["halo_id"][i]), int(cat["type"][i]),
+                        f"{cat['M_halo'][i]:.6g}",
+                        f"{cat['M_star'][i]:.6g}",
+                        f"{cat['SFR'][i]:.6g}", f"{cat['R_200'][i]:.6g}",
+                        f"{cat['x'][i]:.6g}", f"{cat['y'][i]:.6g}",
+                        f"{cat['z'][i]:.6g}"])
+    return path

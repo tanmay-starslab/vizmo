@@ -44,6 +44,7 @@ def run_wgpu_app(
     filters=None,
     series=False,
     split_snapshot=None,
+    catalog=None,
 ):
     """Run the vizmo application with the wgpu backend.
 
@@ -62,6 +63,7 @@ def run_wgpu_app(
     # the reload exactly as the series switcher does.
     _pending_load = {"path": None, "label": ""}
     _split_snapshot_path = split_snapshot
+    _catalog_path = catalog
     if series:
         from .series import discover_snapshots
 
@@ -313,6 +315,14 @@ def run_wgpu_app(
     _sightlines = {"list": [], "placing": False, "pending_start": None,
                    "trident_procs": []}
     drawer.sightlines = _sightlines["list"]
+    if _catalog_path:
+        try:
+            from .catalog import load_catalog
+
+            drawer.catalog = load_catalog(_catalog_path, units)
+            print(f"  Catalog: {len(drawer.catalog['halo_id'])} halos")
+        except Exception as e:
+            print(f"  Catalog load failed: {e}")
 
     # Slice plane (Section 5.A). Shift+Z activates / cycles the normal;
     # Ctrl+drag translates the plane along its normal; the drawer's
@@ -1120,6 +1130,8 @@ def run_wgpu_app(
                 _dispatch_menu_action("open_file")
             elif key == glfw.KEY_Q and (mods & glfw.MOD_CONTROL):
                 _dispatch_menu_action("quit")
+            elif key == glfw.KEY_H and (mods & glfw.MOD_CONTROL):
+                drawer.toggle("halos")
             elif (key == glfw.KEY_D and (mods & glfw.MOD_CONTROL)
                     and (mods & glfw.MOD_SHIFT)):
                 right_dock.enabled = not right_dock.enabled
@@ -1639,6 +1651,50 @@ def run_wgpu_app(
                     if not _slice["active"]:
                         _slice["active"] = True
                     _recompute_slice()
+                elif dr_action in ("halo_fly", "halo_aperture",
+                                   "halo_profile", "halo_csv"):
+                    cat = drawer.catalog
+                    i = drawer._halo_selected
+                    kpc = units.length_to_kpc
+                    if dr_action == "halo_csv" and cat is not None:
+                        from .catalog import (apply_halo_filter,
+                                              halos_to_csv,
+                                              mass_threshold_mask,
+                                              parse_halo_filter)
+                        import datetime as _dt
+
+                        mask = mass_threshold_mask(
+                            cat, drawer._halo_threshold)
+                        out = os.path.join(
+                            screenshot_dir or ".",
+                            f"halos_{_dt.date.today():%Y%m%d}.csv")
+                        halos_to_csv(out, cat, mask)
+                        toasts.show(
+                            f"Halos CSV: {os.path.basename(out)}", "ok")
+                    elif cat is not None and i is not None:
+                        hpos = np.array([cat['x'][i], cat['y'][i],
+                                         cat['z'][i]]) / kpc
+                        r200_code = cat['R_200'][i] / kpc
+                        if dr_action == "halo_fly":
+                            camera.fly_to(
+                                position=hpos + camera.forward
+                                * (-3.0 * r200_code),
+                                look_at=hpos, duration=1.2)
+                            toasts.show(
+                                f"Flying to halo "
+                                f"#{int(cat['halo_id'][i])}")
+                        elif dr_action == "halo_aperture":
+                            _aperture["center"] = hpos
+                            _aperture["radius"] = r200_code
+                            _aperture["shape_idx"] = 0
+                            aperture_panel.enabled = True
+                            _submit_aperture()
+                        elif dr_action == "halo_profile":
+                            data.set_view_center(hpos)
+                            drawer.set_scope(hpos, cat['R_200'][i],
+                                             "halo")
+                            drawer.mode = "profile"
+                            drawer.refresh()
                 elif dr_action == "sightline_csv":
                     if _sightlines["list"]:
                         import os as _os

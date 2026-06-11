@@ -323,3 +323,62 @@ def sightlines_to_csv(path: str, sightlines: list) -> str:
                         lg(s.N_total_H), lg(s.NHI), lg(s.N_OVI),
                         lg(s.N_CIV), lg(s.N_MgII)])
     return path
+
+
+# ---------------------------------------------------------------------------
+# Spectrum viewing support (Section 3.D)
+# ---------------------------------------------------------------------------
+
+def load_spectrum(path):
+    """Load a Trident spectrum (.h5 from SpectrumGenerator or a 2-col
+    FITS) -> (velocity_kms or wavelength, flux) float arrays."""
+    import numpy as np
+
+    if str(path).endswith((".h5", ".hdf5")):
+        import h5py
+
+        with h5py.File(path, "r") as f:
+            wav = np.asarray(f["wavelength"])
+            flux = np.asarray(f["flux"])
+        return wav, flux
+    from astropy.io import fits as pyfits
+
+    with pyfits.open(path) as hdul:
+        for hdu in hdul:
+            if hdu.data is None:
+                continue
+            d = np.asarray(hdu.data)
+            if d.ndim == 2 and d.shape[0] == 2:
+                return d[0].astype(float), d[1].astype(float)
+            if hasattr(hdu, "columns") and len(hdu.columns) >= 2:
+                names = [c.name for c in hdu.columns]
+                return (np.asarray(hdu.data[names[0]], dtype=float),
+                        np.asarray(hdu.data[names[1]], dtype=float))
+    raise ValueError(f"no spectrum table found in {path}")
+
+
+# VoigtFit summary lines look like:
+#   "HI : logN = 14.23 +/- 0.05, b = 25.4 +/- 2.1, v = -45.2"
+VOIGT_LINE_RE = __import__("re").compile(
+    r"logN\s*=\s*([-\d.]+).*?b\s*=\s*([-\d.]+).*?v\s*=\s*([-\d.]+)")
+
+
+def parse_voigtfit_components(text):
+    """Extract (logN, b_kms, v_kms) tuples from VoigtFit output text."""
+    out = []
+    for line in str(text).splitlines():
+        m = VOIGT_LINE_RE.search(line)
+        if m:
+            out.append((float(m.group(1)), float(m.group(2)),
+                        float(m.group(3))))
+    return out
+
+
+COMPARE_COLORS = [(0.42, 0.72, 1.0), (1.0, 0.62, 0.25),
+                  (0.45, 0.9, 0.5), (0.95, 0.4, 0.75),
+                  (0.95, 0.9, 0.4), (0.7, 0.6, 1.0)]
+
+
+def compare_color(i):
+    """Distinct overlay color for sightline index i (cycles)."""
+    return COMPARE_COLORS[i % len(COMPARE_COLORS)]
