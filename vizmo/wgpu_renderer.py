@@ -3613,3 +3613,144 @@ def _read_gpu_timings(renderer):
 WGPURenderer.init_gpu_timing = _init_gpu_timing
 WGPURenderer.read_gpu_timings = _read_gpu_timings
 WGPURenderer.ts_writes = _ts_writes
+
+
+class HaloMarkerRenderer:
+    """3D cross-hair markers for catalog halos (Section 4.F).
+
+    Three orthogonal segments per halo (total length 0.10 R_200),
+    one interleaved [pos, rgba] vertex buffer, line-list topology,
+    colors from log10(M_halo) through plasma over 10^10..10^14 Msun.
+    A selected halo is overdrawn with a doubled white cross.
+    """
+
+    def __init__(self, device, present_format):
+        self.device = device
+        self.n_vertices = 0
+        self._centers_code = None     # (N, 3) for screen-space picking
+        self._ids = None
+        shader = device.create_shader_module(
+            code=_load_wgsl("streamlines.wgsl"))  # same pos+color layout
+        self._bgl = device.create_bind_group_layout(entries=[
+            {"binding": 0, "visibility": wgpu.ShaderStage.VERTEX,
+             "buffer": {"type": "uniform"}}])
+        layout = device.create_pipeline_layout(
+            bind_group_layouts=[self._bgl])
+        self._pipeline = device.create_render_pipeline(
+            layout=layout,
+            vertex={"module": shader, "entry_point": "vs_main",
+                    "buffers": [{
+                        "array_stride": 28, "step_mode": "vertex",
+                        "attributes": [
+                            {"format": "float32x3", "offset": 0,
+                             "shader_location": 0},
+                            {"format": "float32x4", "offset": 12,
+                             "shader_location": 1}]}]},
+            primitive={"topology": "line-list"},
+            fragment={"module": shader, "entry_point": "fs_main",
+                      "targets": [{"format": present_format, "blend": {
+                          "color": {"src_factor": "src-alpha",
+                                    "dst_factor": "one-minus-src-alpha"},
+                          "alpha": {"src_factor": "one",
+                                    "dst_factor": "one-minus-src-alpha"}}}]},
+        )
+        self._ubuf = device.create_buffer(
+            size=64, usage=(wgpu.BufferUsage.UNIFORM
+                            | wgpu.BufferUsage.COPY_DST))
+        self._bg = device.create_bind_group(
+            layout=self._bgl,
+            entries=[{"binding": 0, "resource": {"buffer": self._ubuf}}])
+        self._vbo = None
+        self._ref = np.zeros(3)
+
+    def set_halos(self, catalog, kpc_per_code, mask=None,
+                  selected_id=None):
+        """Build the marker buffer from a catalog dict (kpc fields)."""
+        import matplotlib
+
+        if catalog is None or not len(catalog["halo_id"]):
+            self.n_vertices = 0
+            return
+        n = len(catalog["halo_id"])
+        if mask is None:
+            mask = np.ones(n, dtype=bool)
+        idx = np.flatnonzero(mask)
+        if idx.size == 0:
+            self.n_vertices = 0
+            return
+        pos_code = (np.stack([catalog["x"], catalog["y"],
+                              catalog["z"]], axis=1)[idx]
+                    / kpc_per_code)
+        half = 0.05 * catalog["R_200"][idx] / kpc_per_code  # 0.10 total
+        logm = np.log10(np.clip(catalog["M_halo"][idx], 1e10, 1e14))
+        t = (logm - 10.0) / 4.0
+        cmap = matplotlib.colormaps["plasma"]
+        rgba = np.asarray(cmap(t), dtype=np.float32)
+        rgba[:, 3] = 0.95
+
+        self._ref = pos_code.mean(axis=0)
+        self._centers_code = pos_code
+        self._ids = np.asarray(catalog["halo_id"])[idx]
+
+        m = len(idx)
+        verts = np.zeros((m * 6, 7), dtype=np.float32)
+        rel = pos_code - self._ref[None, :]
+        for axis in range(3):
+            off = np.zeros((m, 3))
+            off[:, axis] = half
+            verts[axis * 2 * m:(axis * 2 + 1) * m, :3] = rel - off
+            verts[(axis * 2 + 1) * m:(axis * 2 + 2) * m, :3] = rel + off
+        # Interleave endpoints pairwise for line-list order.
+        pairs = np.zeros((m * 6, 7), dtype=np.float32)
+        for axis in range(3):
+            a = verts[axis * 2 * m:(axis * 2 + 1) * m]
+            b = verts[(axis * 2 + 1) * m:(axis * 2 + 2) * m]
+            pairs[axis * 2 * m + 0:(axis * 2 + 2) * m:2] = a
+            pairs[axis * 2 * m + 1:(axis * 2 + 2) * m:2] = b
+        cols = np.repeat(rgba, 2, axis=0)
+        pairs[:, 3:] = np.tile(cols, (3, 1))
+        if selected_id is not None:
+            sel = self._ids == selected_id
+            if sel.any():
+                k = int(np.flatnonzero(sel)[0])
+                white = np.array([1, 1, 1, 1], dtype=np.float32)
+                for axis in range(3):
+                    pairs[axis * 2 * m + 2 * k, 3:] = white
+                    pairs[axis * 2 * m + 2 * k + 1, 3:] = white
+        self._vbo = self.device.create_buffer_with_data(
+            data=np.ascontiguousarray(pairs).tobytes(),
+            usage=wgpu.BufferUsage.VERTEX)
+        self.n_vertices = len(pairs)
+
+    def pick(self, world_to_screen, fbw, fbh, x, y, max_px=12.0):
+        """Halo id whose projected center is within max_px, or None."""
+        if self._centers_code is None:
+            return None
+        best, best_d = None, max_px
+        for i, c in enumerate(self._centers_code):
+            res = world_to_screen(c, fbw, fbh)
+            if res is None:
+                continue
+            d = np.hypot(res[0] - x, res[1] - y)
+            if d < best_d:
+                best, best_d = int(self._ids[i]), d
+        return best
+
+    def write_uniforms(self, camera):
+        if self.n_vertices == 0:
+            return
+        view = camera.view_matrix().astype(np.float64)
+        proj = camera.projection_matrix().astype(np.float64)
+        t = np.eye(4)
+        t[:3, 3] = self._ref
+        mvp = (proj @ view @ t).astype(np.float32)
+        self.device.queue.write_buffer(self._ubuf, 0,
+                                       mvp.T.copy().tobytes())
+
+    def render_to_pass(self, rpass):
+        if self.n_vertices == 0 or self._vbo is None:
+            return
+        rpass.set_pipeline(self._pipeline)
+        rpass.set_bind_group(0, self._bg)
+        rpass.set_vertex_buffer(0, self._vbo)
+        rpass.draw(self.n_vertices)

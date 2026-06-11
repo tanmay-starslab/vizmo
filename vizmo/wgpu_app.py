@@ -45,6 +45,7 @@ def run_wgpu_app(
     series=False,
     split_snapshot=None,
     catalog=None,
+    show_welcome=False,
 ):
     """Run the vizmo application with the wgpu backend.
 
@@ -277,6 +278,10 @@ def run_wgpu_app(
                           build_default_menus(_recents.get()))
     from .wgpu_overlay import WGPURightDock
 
+    from .wgpu_overlay import WGPUWelcomeOverlay
+
+    welcome = WGPUWelcomeOverlay(device, present_format)
+    welcome.enabled = bool(show_welcome)
     right_dock = WGPURightDock(device, present_format)
     cmap_browser = WGPUColormapBrowser(device, present_format)
     field_picker = WGPUFieldPicker(device, present_format)
@@ -315,14 +320,44 @@ def run_wgpu_app(
     _sightlines = {"list": [], "placing": False, "pending_start": None,
                    "trident_procs": []}
     drawer.sightlines = _sightlines["list"]
+    from .wgpu_renderer import HaloMarkerRenderer
+
+    halo_markers = HaloMarkerRenderer(device, present_format)
+    _halo_sel = {"id": None}
+
+    def _refresh_halo_markers():
+        from .catalog import mass_threshold_mask
+
+        if drawer.catalog is None:
+            return
+        halo_markers.set_halos(
+            drawer.catalog, units.length_to_kpc,
+            mask=mass_threshold_mask(drawer.catalog,
+                                     drawer._halo_threshold),
+            selected_id=_halo_sel["id"])
+
     if _catalog_path:
         try:
             from .catalog import load_catalog
 
             drawer.catalog = load_catalog(_catalog_path, units)
             print(f"  Catalog: {len(drawer.catalog['halo_id'])} halos")
+            _refresh_halo_markers()
         except Exception as e:
             print(f"  Catalog load failed: {e}")
+
+    # Drag-and-drop: dropping an HDF5 file loads it in place.
+    def _drop_callback(win, paths):
+        for p_ in paths:
+            if str(p_).endswith((".hdf5", ".h5")):
+                _pending_load["path"] = str(p_)
+                _pending_load["label"] = os.path.basename(str(p_))
+                return
+
+    try:
+        glfw.set_drop_callback(window, _drop_callback)
+    except Exception:
+        pass
 
     # Slice plane (Section 5.A). Shift+Z activates / cycles the normal;
     # Ctrl+drag translates the plane along its normal; the drawer's
@@ -838,7 +873,9 @@ def run_wgpu_app(
             if key == glfw.KEY_ESCAPE:
                 # Esc cancels aperture placement, then closes panels;
                 # quits only when nothing is in the way.
-                if menubar.on_escape():
+                if welcome.enabled:
+                    welcome.enabled = False
+                elif menubar.on_escape():
                     pass
                 elif cmap_browser.enabled:
                     cmap_browser.enabled = False
@@ -1378,6 +1415,17 @@ def run_wgpu_app(
         idle_streak = 0
         if button == glfw.MOUSE_BUTTON_LEFT and action == glfw.PRESS:
             x, y = _cursor_to_fb(win)
+            if welcome.enabled:
+                w_action = welcome.on_click(x, y)
+                if w_action:
+                    if (isinstance(w_action, tuple)
+                            and w_action[0] == "welcome_open"):
+                        _pending_load["path"] = w_action[1]
+                        _pending_load["label"] = os.path.basename(
+                            w_action[1])
+                    elif w_action == "open_file":
+                        _dispatch_menu_action("open_file")
+                    return
             mb_action = menubar.on_click(x, y)
             if mb_action:
                 if mb_action is not True:
@@ -1452,6 +1500,23 @@ def run_wgpu_app(
                     toasts.show("Building spatial index...", "info")
                 return
             if shift_held:
+                if (drawer.catalog is not None
+                        and halo_markers.n_vertices > 0):
+                    fw_, fh_ = glfw.get_framebuffer_size(win)
+                    hid = halo_markers.pick(_world_to_screen, fw_, fh_,
+                                            x, y, max_px=12.0)
+                    if hid is not None:
+                        rows = np.flatnonzero(
+                            np.asarray(drawer.catalog["halo_id"]) == hid)
+                        if rows.size:
+                            drawer._halo_selected = int(rows[0])
+                            _halo_sel["id"] = hid
+                            _refresh_halo_markers()
+                            drawer.enabled = True
+                            drawer.mode = "haloinspect"
+                            drawer.refresh()
+                            toasts.show(f"Halo #{hid}", "ok")
+                            return
                 # Shift+click: pick the particle under the cursor. The
                 # actual KD-tree query runs from the main loop a frame
                 # later so the "building index" toast can present first.
@@ -1651,6 +1716,8 @@ def run_wgpu_app(
                     if not _slice["active"]:
                         _slice["active"] = True
                     _recompute_slice()
+                elif dr_action is True and drawer.mode == "halos":
+                    _refresh_halo_markers()
                 elif dr_action in ("halo_fly", "halo_aperture",
                                    "halo_profile", "halo_csv"):
                     cat = drawer.catalog
@@ -1695,6 +1762,51 @@ def run_wgpu_app(
                                              "halo")
                             drawer.mode = "profile"
                             drawer.refresh()
+                elif dr_action == "spec_voigt":
+                    sls = [s for s in _sightlines["list"]
+                           if s.trident_spectrum_path
+                           and os.path.exists(s.trident_spectrum_path)]
+                    if not sls:
+                        toasts.show("Run Trident first", "warn")
+                    else:
+                        try:
+                            from .spectro import launch_voigtfit
+
+                            proc = launch_voigtfit(
+                                sls[-1], redshift=units.redshift,
+                                output_dir=os.path.join(
+                                    screenshot_dir or ".", "spectra"))
+                            _sightlines["trident_procs"].append(
+                                (sls[-1], proc))
+                            toasts.show(
+                                f"VoigtFit running for {sls[-1].label}...",
+                                "info", duration=6.0)
+                        except (ImportError, ValueError) as e:
+                            toasts.show(str(e), "error", duration=8.0)
+                elif dr_action == "spec_pdf":
+                    sls = [s for s in _sightlines["list"]
+                           if s.trident_spectrum_path
+                           and os.path.exists(s.trident_spectrum_path)]
+                    if not sls:
+                        toasts.show("Run Trident first", "warn")
+                    else:
+                        try:
+                            from .spectro import save_spectrum_pdf
+                            import datetime as _dt
+
+                            sl_ = sls[-1]
+                            out = os.path.join(
+                                screenshot_dir or ".", "spectra",
+                                f"{sl_.label}_{_dt.date.today():%Y%m%d}"
+                                ".pdf")
+                            os.makedirs(os.path.dirname(out),
+                                        exist_ok=True)
+                            save_spectrum_pdf(sl_, out, snapshot_path,
+                                              units.redshift)
+                            toasts.show(
+                                f"PDF: {os.path.basename(out)}", "ok")
+                        except Exception as e:
+                            toasts.show(f"PDF failed: {e}", "error")
                 elif dr_action == "sightline_csv":
                     if _sightlines["list"]:
                         import os as _os
@@ -3137,6 +3249,9 @@ def run_wgpu_app(
                           menubar, cmap_browser, field_picker):
                     p.set_framebuffer_size(fb_w, fb_h)
                 menubar.update()
+                if welcome.enabled:
+                    welcome.set_framebuffer_size(fb_w, fb_h)
+                    welcome.update()
                 right_dock.set_framebuffer_size(fb_w, fb_h)
                 if right_dock.enabled:
                     right_dock.update(
@@ -3184,6 +3299,25 @@ def run_wgpu_app(
                 if _sightlines["trident_procs"]:
                     done_now = []
                     for sl_t, proc in _sightlines["trident_procs"]:
+                        vsent = sl_t.extra.get("voigt_done_sentinel")
+                        if vsent and os.path.exists(vsent):
+                            try:
+                                from .spectro import (
+                                    parse_voigtfit_components)
+
+                                comps = parse_voigtfit_components(
+                                    open(sl_t.extra["voigt_log"]).read())
+                                sl_t.extra["voigt_components"] = comps
+                                drawer.refresh()
+                                toasts.show(
+                                    f"VoigtFit: {len(comps)} components "
+                                    f"for {sl_t.label}", "ok",
+                                    duration=8.0)
+                            except Exception as e:
+                                toasts.show(f"VoigtFit parse: {e}",
+                                            "error")
+                            done_now.append((sl_t, proc))
+                            continue
                         sent = sl_t.extra.get("trident_done_sentinel")
                         if sent and os.path.exists(sent):
                             done_now.append((sl_t, proc))
@@ -3320,6 +3454,9 @@ def run_wgpu_app(
                 if _stream["visible"] and stream_renderer.lines:
                     stream_renderer.write_uniforms(camera)
                     stream_renderer.render_to_pass(rpass)
+                if halo_markers.n_vertices > 0:
+                    halo_markers.write_uniforms(camera)
+                    halo_markers.render_to_pass(rpass)
                 if _orbit_trail["visible"] and orbit_trail_renderer.lines:
                     orbit_trail_renderer.write_uniforms(camera)
                     orbit_trail_renderer.render_to_pass(rpass)
@@ -3364,6 +3501,8 @@ def run_wgpu_app(
                     cmap_browser.render_to_pass(rpass)
                 if field_picker.enabled:
                     field_picker.render_to_pass(rpass)
+                if welcome.enabled:
+                    welcome.render_to_pass(rpass)
                 toasts.render_to_pass(rpass)
                 rpass.end()
             except Exception:

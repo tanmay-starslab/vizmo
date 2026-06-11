@@ -16,10 +16,21 @@
 - Welcome chooser: `vizmo` with no arguments prints recents +
   quickstart and opens the file dialog (Section 6.J chooser form).
 
-### Deferred
-- 3D halo cross-hair markers + 12px click pick (needs a line_list
-  renderer pass), VoigtFit subprocess launch + overlay rendering,
-  spectrum Save-PDF, full-canvas welcome splash overlay, drag-drop.
+### Completed in follow-up (same day) — deferred list cleared
+- 3D halo cross-hair markers: line-list renderer, 0.10 R_200 crosses,
+  plasma-colored by log M_halo over 10^10..10^14, threshold-masked,
+  white-highlighted selection; Shift+click within 12 px of a marker
+  opens the halo inspector (particle pick falls through otherwise).
+- VoigtFit subprocess launcher (sentinel pattern, graceful when not
+  installed) + fitted components parsed into the sightline and drawn
+  as dashed display-Gaussian overlays on the spectrum plot.
+- Spectrum Save-PDF: continuum, trough shading, component markers,
+  metadata footer (snapshot, z, impact parameter).
+- Full-canvas welcome splash: ASCII logo, recents with size/date,
+  accent Open button, quickstart tips, version line; click-outside/
+  Escape dismissal; shown after the bare-command chooser launch.
+- Drag-and-drop: dropping an .hdf5/.h5 onto the window loads it in
+  place via the shared pending-load queue (glfw drop callback).
 
 ## 0.7.1 — 2026-06-10
 

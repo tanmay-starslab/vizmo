@@ -54,3 +54,35 @@ def test_compare_colors_distinct():
     c0, c1 = compare_color(0), compare_color(1)
     assert c0 != c1
     assert compare_color(6) == c0  # cycles
+
+
+def test_voigt_gaussian_profile_shape():
+    from vizmo.spectro import voigt_gaussian_profile
+
+    v = np.linspace(-300, 300, 601)
+    prof = voigt_gaussian_profile(v, logN=14.0, b_kms=30.0, v0_kms=-50.0)
+    assert prof.shape == v.shape
+    assert (prof <= 1.0).all() and (prof > 0).all()
+    # Minimum (deepest absorption) sits at the centroid.
+    assert abs(v[int(np.argmin(prof))] - (-50.0)) <= 1.0
+    # Far wings recover the continuum.
+    assert prof[0] > 0.999 and prof[-1] > 0.999
+
+
+def test_save_spectrum_pdf(tmp_path):
+    import h5py
+
+    from vizmo.spectro import Sightline, save_spectrum_pdf
+
+    spec = str(tmp_path / "s.h5")
+    with h5py.File(spec, "w") as f:
+        w = np.linspace(1210, 1222, 300)
+        f["wavelength"] = w
+        f["flux"] = 1.0 - 0.7 * np.exp(-0.5 * ((w - 1216) / 0.5) ** 2)
+    sl = Sightline(start=np.zeros(3), end=np.ones(3), label="SL-T")
+    sl.trident_spectrum_path = spec
+    sl.impact_b_kpc = 42.0
+    sl.extra["voigt_components"] = [(14.2, 25.0, -40.0)]
+    out = save_spectrum_pdf(sl, str(tmp_path / "s.pdf"),
+                            "snap.hdf5", 0.1)
+    assert open(out, "rb").read(5) == b"%PDF-"

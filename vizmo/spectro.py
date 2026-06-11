@@ -382,3 +382,107 @@ COMPARE_COLORS = [(0.42, 0.72, 1.0), (1.0, 0.62, 0.25),
 def compare_color(i):
     """Distinct overlay color for sightline index i (cycles)."""
     return COMPARE_COLORS[i % len(COMPARE_COLORS)]
+
+
+_VOIGTFIT_SCRIPT = '''
+import json
+import sys
+
+import numpy as np
+
+spec_path, ion, z, outbase = sys.argv[1:5]
+import VoigtFit
+
+ds = VoigtFit.DataSet(float(z))
+import h5py
+
+with h5py.File(spec_path, "r") as f:
+    wl = np.asarray(f["wavelength"])
+    flux = np.asarray(f["flux"])
+ds.add_data(wl, flux, 299792.458 / np.median(wl), err=np.full_like(flux, 0.02))
+ds.add_line(ion)
+ds.prepare_dataset()
+popt, chi2 = ds.fit()
+comps = []
+for line in str(ds.print_results()).splitlines():
+    comps.append(line)
+open(outbase + ".log", "w").write("\\n".join(comps))
+open(outbase + ".done", "w").write("ok")
+'''
+
+
+def launch_voigtfit(sightline, ion="HI 1216", redshift=0.0,
+                    output_dir="spectra"):
+    """Launch VoigtFit on a sightline's Trident spectrum in a
+    subprocess (sentinel-file completion, same pattern as the Trident
+    launcher). Raises ImportError when VoigtFit isn't installed and
+    ValueError when no spectrum exists yet."""
+    try:
+        import VoigtFit  # noqa: F401
+    except ImportError as e:
+        raise ImportError(
+            "VoigtFit is not installed — pip install VoigtFit") from e
+    if not (sightline.trident_spectrum_path
+            and os.path.exists(sightline.trident_spectrum_path)):
+        raise ValueError("run Trident first: no spectrum on disk")
+    os.makedirs(output_dir, exist_ok=True)
+    outbase = os.path.join(
+        output_dir, sightline.label.replace(" ", "_") + "_voigt")
+    script = tempfile.NamedTemporaryFile(
+        "w", suffix="_vizmo_voigt.py", delete=False)
+    script.write(_VOIGTFIT_SCRIPT)
+    script.close()
+    proc = subprocess.Popen(
+        [sys.executable, script.name, sightline.trident_spectrum_path,
+         ion, f"{redshift:.6f}", outbase],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    sightline.extra["voigt_done_sentinel"] = outbase + ".done"
+    sightline.extra["voigt_log"] = outbase + ".log"
+    return proc
+
+
+def voigt_gaussian_profile(v_kms, logN, b_kms, v0_kms,
+                           tau_scale=1e-13):
+    """Display-only Gaussian optical-depth profile for one fitted
+    component: flux = exp(-tau), tau = tau_scale*10^logN/b *
+    exp(-(v-v0)^2/b^2). Used to overlay fit components on the
+    spectrum plot — not for quantitative radiative transfer."""
+    tau = (tau_scale * 10.0**logN / max(b_kms, 1.0)
+           * np.exp(-((np.asarray(v_kms) - v0_kms) / b_kms) ** 2))
+    return np.exp(-np.clip(tau, 0, 50))
+
+
+def save_spectrum_pdf(sightline, out_path, snapshot_path="",
+                      redshift=0.0):
+    """Publication PDF of the sightline's Trident spectrum with
+    continuum, trough shading, fitted components (when present), and
+    a metadata footer."""
+    from matplotlib.backends.backend_pdf import PdfPages
+    from matplotlib.figure import Figure
+
+    w, flux = load_spectrum(sightline.trident_spectrum_path)
+    fig = Figure(figsize=(8, 4.5), dpi=150)
+    ax = fig.add_subplot(111)
+    ax.plot(w, flux, lw=0.9, color="k")
+    ax.axhline(1.0, ls="--", lw=0.8, color="gray")
+    ax.fill_between(w, flux, 1.0, where=flux < 0.9, color="C0",
+                    alpha=0.25, linewidth=0)
+    comps = sightline.extra.get("voigt_components") or []
+    for k, (logN, b, v0) in enumerate(comps):
+        ax.axvline(np.median(w) * (1 + v0 / 299792.458), ls=":",
+                   lw=0.8, color=f"C{k + 1}",
+                   label=f"logN={logN:.2f} b={b:.0f} v={v0:+.0f}")
+    if comps:
+        ax.legend(fontsize=7)
+    ax.set_xlabel("wavelength [A]")
+    ax.set_ylabel("F / F_continuum")
+    ax.set_ylim(0, 1.25)
+    b_txt = (f"b = {sightline.impact_b_kpc:.0f} kpc"
+             if sightline.impact_b_kpc is not None else "")
+    fig.text(0.01, 0.01,
+             f"{os.path.basename(snapshot_path)}  z={redshift:.3f}  "
+             f"{sightline.label}  {b_txt}", fontsize=6, color="gray")
+    fig.tight_layout(rect=(0, 0.03, 1, 1))
+    with PdfPages(out_path) as pdf:
+        pdf.savefig(fig)
+    return out_path

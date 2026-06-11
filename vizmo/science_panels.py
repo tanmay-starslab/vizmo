@@ -1018,6 +1018,22 @@ class AnalysisDrawer(Panel):
             ax.plot(w, flux, lw=1.0, color=c, label=sl.label)
             ax.fill_between(w, flux, 1.0, where=flux < 0.9,
                             color=c, alpha=0.25, linewidth=0)
+        # Fitted Voigt components as colored display Gaussians.
+        for k, sl in enumerate(sightlines):
+            comps = (sl.extra or {}).get("voigt_components") or []
+            if comps:
+                from .spectro import voigt_gaussian_profile
+
+                try:
+                    w0, _ = load_spectrum(sl.trident_spectrum_path)
+                    wmid = float(np.median(w0))
+                    v = (w0 / wmid - 1.0) * 299792.458
+                    for j, (logN, b, v0) in enumerate(comps):
+                        prof = voigt_gaussian_profile(v, logN, b, v0)
+                        ax.plot(w0, prof, lw=1.0,
+                                color=compare_color(j + 1), ls="--")
+                except Exception:
+                    pass
         ax.axhline(1.0, ls="--", lw=0.8, color=(0.7, 0.72, 0.78))
         ax.set_ylim(0, 1.2)
         ax.set_xlabel("wavelength [A]", fontsize=9)
@@ -1571,6 +1587,8 @@ class AnalysisDrawer(Panel):
             bx = M
             bx = fbtn(bx, "Compare", "spec_compare",
                       active=self._spec_compare)
+            bx = fbtn(bx, "Voigt", "spec_voigt")
+            bx = fbtn(bx, "PDF", "spec_pdf")
         elif self.mode == "sightline":
             bx = M
             bx = fbtn(bx, "CSV", "sightline_csv")
@@ -2190,6 +2208,172 @@ class RightDock(Panel):
             return False
         for x0, y0, x1, y1, action in self._buttons:
             if x0 <= lx <= x1 and y0 <= ly <= y1:
+                return action
+        return True
+
+    def render(self):
+        if not self.enabled:
+            return
+        super().render()
+
+
+VIZMO_LOGO = [
+ "██╗   ██╗██╗███████╗███╗   ███╗ ██████╗ ",
+ "██║   ██║██║╚══███╔╝████╗ ████║██╔═══██╗",
+ "██║   ██║██║  ███╔╝ ██╔████╔██║██║   ██║",
+ "╚██╗ ██╔╝██║ ███╔╝  ██║╚██╔╝██║██║   ██║",
+ " ╚████╔╝ ██║███████╗██║ ╚═╝ ██║╚██████╔╝",
+ "  ╚═══╝  ╚═╝╚══════╝╚═╝     ╚═╝ ╚═════╝ ",
+]
+
+
+class WelcomeOverlay(Panel):
+    """Full-canvas welcome splash (Section 6.J).
+
+    Shown when vizmo is launched through the bare-command chooser;
+    dismissed by Escape, any click outside an interactive zone, or
+    automatically after a recent file is picked. Recents rows return
+    ('welcome_open', path) actions; the Open button returns
+    'open_file' for the standard dialog dispatch.
+    """
+
+    def __init__(self):
+        super().__init__(DRAWER_STYLE)
+        self.enabled = False
+        self.style = PanelStyle(**{**DRAWER_STYLE.__dict__,
+                                   "position": "center",
+                                   "font_family": "monospace"})
+        self._buttons = []
+        self._last_key = None
+
+    def _recent_rows(self):
+        import datetime
+        import os
+
+        from .recentfiles import RecentFiles
+
+        rows = []
+        for p in RecentFiles().get()[:10]:
+            name = os.path.basename(p)
+            if len(name) > 30:
+                name = name[:29] + "…"
+            try:
+                st = os.stat(p)
+                size = (f"{st.st_size / 1e9:.1f} GB"
+                        if st.st_size > 1e9
+                        else f"{st.st_size / 1e6:.0f} MB")
+                date = datetime.date.fromtimestamp(
+                    st.st_mtime).isoformat()
+            except OSError:
+                size, date = "?", ""
+            rows.append((p, name, size, date))
+        return rows
+
+    def update(self, _data=None):
+        if not self.enabled:
+            return
+        import platform
+
+        s = self.style
+        M, LH = s.margin, s.line_height
+        recents = self._recent_rows()
+        key = (tuple(r[0] for r in recents), self._fb_width,
+               self._fb_height)
+        if key == self._last_key and self._tex is not None:
+            return
+        self._last_key = key
+        self._buttons = []
+
+        tw = 640
+        th = (len(VIZMO_LOGO) + 4) * LH + LH * max(len(recents) + 2, 6) \
+            + 5 * LH + 3 * M
+        img = Image.new("RGBA", (tw, th), DarkTheme.BG_SURFACE)
+        draw = ImageDraw.Draw(img)
+        _rounded(draw, [(0, 0), (tw - 1, th - 1)], s.radius,
+                 fill=DarkTheme.BG_SURFACE, outline=DarkTheme.BORDER)
+        y = M
+        for line in VIZMO_LOGO:
+            bb = draw.textbbox((0, 0), line, font=self._font)
+            draw.text(((tw - bb[2] + bb[0]) // 2, y), line,
+                      fill=DarkTheme.ACCENT, font=self._font)
+            y += LH
+        tag = "real-time quantitative simulation explorer — v0.8"
+        bb = draw.textbbox((0, 0), tag, font=self._font)
+        draw.text(((tw - bb[2] + bb[0]) // 2, y), tag,
+                  fill=DarkTheme.TEXT_SECONDARY, font=self._font)
+        y += 2 * LH
+
+        col_x = tw // 2
+        draw.line([(col_x, y), (col_x, th - 3 * LH)],
+                  fill=DarkTheme.BORDER)
+        # Left: recents
+        draw.text((M, y), "RECENT FILES",
+                  fill=DarkTheme.TEXT_SECONDARY, font=self._font)
+        ry = y + LH
+        if not recents:
+            draw.text((M, ry), "No recent files",
+                      fill=DarkTheme.TEXT_DISABLED, font=self._font)
+        for path, name, size, date in recents:
+            draw.text((M, ry), name, fill=DarkTheme.TEXT_PRIMARY,
+                      font=self._font)
+            meta = f"{size}  {date}"
+            bb = draw.textbbox((0, 0), meta, font=self._font)
+            draw.text((col_x - M - (bb[2] - bb[0]), ry), meta,
+                      fill=DarkTheme.TEXT_DISABLED, font=self._font)
+            self._buttons.append((M, ry, col_x - M, ry + LH,
+                                  ("welcome_open", path)))
+            ry += LH
+        # Right: open + quickstart + versions
+        rx = col_x + M
+        _rounded(draw, [(rx, y), (tw - M, y + int(1.4 * LH))], 8,
+                 fill=DarkTheme.ACCENT)
+        lbl = "Open Simulation File"
+        bb = draw.textbbox((0, 0), lbl, font=self._font)
+        draw.text((rx + (tw - M - rx - bb[2] + bb[0]) // 2,
+                   y + LH // 5), lbl, fill=DarkTheme.TEXT_PRIMARY,
+                  font=self._font)
+        self._buttons.append((rx, y, tw - M, y + int(1.4 * LH),
+                              "open_file"))
+        qy = y + 2 * LH
+        draw.text((rx, qy), "or drag a file onto this window",
+                  fill=DarkTheme.TEXT_DISABLED, font=self._font)
+        qy += LH
+        draw.text((rx, qy), "QUICKSTART",
+                  fill=DarkTheme.TEXT_SECONDARY, font=self._font)
+        qy += LH
+        for tip in ("vizmo snapshot.hdf5 — basic launch",
+                    "Shift+Z — slice through the galaxy",
+                    "M — draw analysis aperture"):
+            draw.text((rx, qy), tip, fill=DarkTheme.TEXT_PRIMARY,
+                      font=self._font)
+            qy += LH
+        try:
+            import meshoid
+
+            mver = getattr(meshoid, "__version__", "?")
+        except Exception:
+            mver = "?"
+        import wgpu as _wgpu
+
+        vline = (f"py {platform.python_version()} | wgpu "
+                 f"{_wgpu.__version__} | meshoid {mver}")
+        draw.text((M, th - LH - 4), vline,
+                  fill=DarkTheme.TEXT_DISABLED, font=self._font)
+
+        self._panel_w, self._panel_h = tw, th
+        self._panel_x, self._panel_y = self._panel_origin(tw, th)
+        self._upload_panel(tw, th, img.tobytes())
+
+    def on_click(self, x, y):
+        if not self.enabled:
+            return False
+        lx, ly = x - self._panel_x, y - self._panel_y
+        if not (0 <= lx <= self._panel_w and 0 <= ly <= self._panel_h):
+            self.enabled = False  # click outside dismisses
+            return True
+        for x0, y0, x1, y1, action in self._buttons:
+            if x0 <= lx <= x1 and y0 <= ly <= y1:
+                self.enabled = False
                 return action
         return True
 

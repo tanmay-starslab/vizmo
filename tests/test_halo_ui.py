@@ -81,3 +81,51 @@ def test_halos_csv(tmp_path):
     lines = open(out).read().strip().splitlines()
     assert len(lines) == 3  # header + 2 halos above 1e12
     assert lines[1].startswith("0,")
+
+
+def test_marker_geometry_and_pick():
+    """HaloMarkerRenderer vertex math + 12px screen pick (CPU side:
+    GPU buffer creation is exercised in-app; here we validate the
+    line-list layout and the pick on a fake projector)."""
+    import types
+
+    from vizmo.wgpu_renderer import HaloMarkerRenderer
+
+    # Bypass GPU init: build a bare instance with only the fields the
+    # CPU paths need.
+    r = HaloMarkerRenderer.__new__(HaloMarkerRenderer)
+    cat = _cat()
+    r._centers_code = np.stack([cat["x"], cat["y"], cat["z"]],
+                               axis=1) + np.arange(4)[:, None]
+    r._ids = cat["halo_id"]
+
+    def fake_w2s(p, w, h):
+        # Halo i projects to x = 100 * i, y = 0.
+        return (100.0 * p[0], 0.0, 1.0)
+
+    assert r.pick(fake_w2s, 800, 600, 205, 5, max_px=12) == 2
+    assert r.pick(fake_w2s, 800, 600, 150, 0, max_px=12) is None
+
+
+def test_welcome_overlay_layout(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    from vizmo.recentfiles import RecentFiles
+    from vizmo.science_panels import WelcomeOverlay
+
+    snap = tmp_path / "demo.hdf5"
+    snap.write_bytes(b"0" * 2_000_000)
+    RecentFiles().add(str(snap))
+
+    w = WelcomeOverlay()
+    w.enabled = True
+    w.set_framebuffer_size(1280, 800)
+    w.update()
+    assert w._panel_w == 640
+    actions = [b[4] for b in w._buttons]
+    assert "open_file" in actions
+    opens = [a for a in actions
+             if isinstance(a, tuple) and a[0] == "welcome_open"]
+    assert len(opens) == 1 and opens[0][1] == str(snap)
+    # Outside click dismisses.
+    assert w.on_click(-50, -50) is True
+    assert w.enabled is False

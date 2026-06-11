@@ -23,6 +23,7 @@ from .science_panels import (
     ColormapBrowserPanel,
     FieldPickerPanel,
     RightDock,
+    WelcomeOverlay,
 )
 
 SHADER_DIR = Path(__file__).parent / "shaders"
@@ -313,4 +314,10 @@ class WGPUFieldPicker(_WGPUPanelMixin, FieldPickerPanel):
 class WGPURightDock(_WGPUPanelMixin, RightDock):
     def __init__(self, device, present_format):
         RightDock.__init__(self)
+        self._init_wgpu(device, present_format)
+
+
+class WGPUWelcomeOverlay(_WGPUPanelMixin, WelcomeOverlay):
+    def __init__(self, device, present_format):
+        WelcomeOverlay.__init__(self)
         self._init_wgpu(device, present_format)

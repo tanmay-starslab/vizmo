@@ -154,6 +154,7 @@ def main():
         if not sel:
             sys.exit(0)
         args.snapshot = sel
+        args._show_welcome = True
 
     types = None
     if args.types:
@@ -194,6 +195,7 @@ def main():
                 series=args.series,
                 split_snapshot=args.split,
                 catalog=args.catalog,
+                show_welcome=getattr(args, "_show_welcome", False),
             )
         finally:
             pr.disable()
@@ -224,6 +226,7 @@ def main():
             series=args.series,
             split_snapshot=args.split,
             catalog=args.catalog,
+            show_welcome=getattr(args, "_show_welcome", False),
         )
 
 
