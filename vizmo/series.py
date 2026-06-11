@@ -99,3 +99,72 @@ def discover_snapshots(path: str) -> list:
             snap_num=_snap_num_from_name(fp)))
     out.sort(key=lambda s: -s.redshift)
     return out
+
+
+class TimelinePlayer:
+    """Playback + geometry model for the timeline scrubber.
+
+    Pure logic (testable headlessly): playhead pixel positions are
+    linear in redshift across [z_max, z_min]; tick() advances one
+    snapshot every 1/fps seconds of monotonic time while playing.
+    """
+
+    def __init__(self, snaps, fps=24.0):
+        self.snaps = list(snaps)
+        self.index = 0
+        self.fps = float(fps)
+        self.playing = False
+        self._last_advance = None
+
+    # -- geometry -----------------------------------------------------------
+
+    def positions_px(self, track_width):
+        """Pixel x of each snapshot on a track of `track_width`,
+        linear in redshift (z_max at x=0, z_min at the right edge)."""
+        if not self.snaps:
+            return []
+        zs = [s.redshift for s in self.snaps]
+        z0, z1 = max(zs), min(zs)
+        span = max(z0 - z1, 1e-12)
+        return [(z0 - z) / span * track_width for z in zs]
+
+    def nearest_index(self, x_px, track_width):
+        pos = self.positions_px(track_width)
+        if not pos:
+            return 0
+        return int(min(range(len(pos)), key=lambda i: abs(pos[i] - x_px)))
+
+    # -- navigation -----------------------------------------------------------
+
+    def step(self, delta):
+        new = max(0, min(len(self.snaps) - 1, self.index + delta))
+        changed = new != self.index
+        self.index = new
+        return changed
+
+    def home(self):
+        return self.step(-len(self.snaps))
+
+    def end(self):
+        return self.step(len(self.snaps))
+
+    def toggle_play(self):
+        self.playing = not self.playing
+        self._last_advance = None
+        return self.playing
+
+    def tick(self, now):
+        """Advance while playing; returns True when the index moved.
+        `now` is a monotonic timestamp (injected for testability)."""
+        if not self.playing or len(self.snaps) < 2:
+            return False
+        if self._last_advance is None:
+            self._last_advance = now
+            return False
+        if now - self._last_advance < 1.0 / max(self.fps, 1e-6):
+            return False
+        self._last_advance = now
+        if self.index >= len(self.snaps) - 1:
+            self.playing = False
+            return False
+        return self.step(+1)

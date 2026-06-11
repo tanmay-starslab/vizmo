@@ -1058,7 +1058,7 @@ class HelpOverlay(Panel):
         from .keymap import KEYBINDINGS
 
         items = [("text", "vizmo controls"), ("text", "")]
-        items += [("kv", k, desc) for k, desc in KEYBINDINGS]
+        items += [("kv", k, desc) for k, desc, _cat in KEYBINDINGS]
         items += [("text", ""), ("text", "F1 / H / Esc to close")]
         self.render_panel(items)
 
@@ -1577,6 +1577,7 @@ def build_default_menus(recent_paths=()):
         MenuItem("VTK File", "", "export_vtk"),
         MenuItem("LaTeX Table", "", "stats_latex"),
         MenuItem("All Data (ZIP)", "Ctrl+Shift+E", "export_zip"),
+        MenuItem("Movie...", "Ctrl+V", "movie"),
     ]
     recents = [MenuItem(("..." + p[-34:]) if len(p) > 34 else p, "",
                         ("open_recent", p))
@@ -1627,7 +1628,7 @@ def build_default_menus(recent_paths=()):
         "Export": list(export_items),
         "Help": [
             MenuItem("Help Browser", "F1", "help"),
-            MenuItem("Keyboard Shortcuts", "", "help"),
+            MenuItem("Keyboard Shortcuts", "", "shortcuts"),
             MenuItem("About", "", "about"),
         ],
     }

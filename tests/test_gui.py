@@ -16,7 +16,7 @@ def test_menubar_file_menu():
     # Export submenu carries the seven export targets.
     exp = next(i for i in items if i.label == "Export")
     assert exp.submenu is not None
-    assert len(exp.submenu) == 7
+    assert len(exp.submenu) == 8  # incl. Movie...
 
 
 def test_menubar_all_five_menus():

@@ -25,6 +25,10 @@ from .science_panels import (
     RightDock,
     WelcomeOverlay,
     LoadingOverlay,
+    TimelineScrubber,
+    MovieRecorderPanel,
+    AboutPanel,
+    KeyboardShortcutsPanel,
 )
 
 SHADER_DIR = Path(__file__).parent / "shaders"
@@ -327,4 +331,28 @@ class WGPUWelcomeOverlay(_WGPUPanelMixin, WelcomeOverlay):
 class WGPULoadingOverlay(_WGPUPanelMixin, LoadingOverlay):
     def __init__(self, device, present_format):
         LoadingOverlay.__init__(self)
+        self._init_wgpu(device, present_format)
+
+
+class WGPUTimelineScrubber(_WGPUPanelMixin, TimelineScrubber):
+    def __init__(self, device, present_format):
+        TimelineScrubber.__init__(self)
+        self._init_wgpu(device, present_format)
+
+
+class WGPUMovieRecorder(_WGPUPanelMixin, MovieRecorderPanel):
+    def __init__(self, device, present_format):
+        MovieRecorderPanel.__init__(self)
+        self._init_wgpu(device, present_format)
+
+
+class WGPUAboutPanel(_WGPUPanelMixin, AboutPanel):
+    def __init__(self, device, present_format):
+        AboutPanel.__init__(self)
+        self._init_wgpu(device, present_format)
+
+
+class WGPUShortcutsPanel(_WGPUPanelMixin, KeyboardShortcutsPanel):
+    def __init__(self, device, present_format):
+        KeyboardShortcutsPanel.__init__(self)
         self._init_wgpu(device, present_format)

@@ -2433,3 +2433,504 @@ class LoadingOverlay(Panel):
         if not self.enabled:
             return
         super().render()
+
+
+# ---------------------------------------------------------------------------
+# Timeline scrubber (Section 4.C), movie recorder (10.B), About,
+# keyboard-shortcuts browser
+# ---------------------------------------------------------------------------
+
+class TimelineScrubber(Panel):
+    """Bottom-edge series timeline: ruler with z ticks, per-snapshot
+    circles, playhead, transport buttons, fps readout."""
+
+    HEIGHT = 50
+
+    def __init__(self):
+        super().__init__(STATUS_STYLE)
+        self.enabled = False
+        self.style = PanelStyle(**{**STATUS_STYLE.__dict__,
+                                   "position": "bottom-center"})
+        self.anchor_offset = (0, 10)
+        self.player = None       # series.TimelinePlayer set by the app
+        self._buttons = []
+        self._track = (0, 0)     # (x0, width) for click mapping
+        self._last_key = None
+
+    def update(self):
+        if not self.enabled or self.player is None:
+            return
+        tp = self.player
+        s = self.style
+        fbw = max(self._fb_width, 100)
+        tw = fbw - 8
+        th = self.HEIGHT
+        cur = tp.snaps[tp.index]
+        key = (tp.index, tp.playing, round(tp.fps, 1), tw,
+               self._fb_height)
+        if key == self._last_key and self._tex is not None:
+            return
+        self._last_key = key
+        self._buttons = []
+
+        img = Image.new("RGBA", (tw, th), DarkTheme.TRANSPARENT)
+        draw = ImageDraw.Draw(img)
+        draw.rectangle([(0, 0), (tw, th)], fill=DarkTheme.BG_SURFACE)
+        draw.rectangle([(0, 0), (tw, 1)], fill=DarkTheme.BORDER)
+
+        # Row 2 (top 30px): the ruler.
+        track_w = int(tw * 0.9) - 220
+        tx0 = 180
+        ty = 16
+        self._track = (tx0, track_w)
+        draw.line([(tx0, ty), (tx0 + track_w, ty)],
+                  fill=DarkTheme.BORDER, width=2)
+        zs = [sn.redshift for sn in tp.snaps]
+        z0, z1 = max(zs), min(zs)
+        span = max(z0 - z1, 1e-12)
+
+        def x_of(z):
+            return tx0 + (z0 - z) / span * track_w
+
+        # Major ticks every dz=1.0 (labeled), minor every 0.2.
+        z = np.floor(z1 / 0.2) * 0.2
+        while z <= z0 + 1e-9:
+            big = abs(z - round(z)) < 1e-9
+            xx = x_of(z)
+            draw.line([(xx, ty - (6 if big else 3)),
+                       (xx, ty + (6 if big else 3))],
+                      fill=DarkTheme.TEXT_SECONDARY, width=1)
+            if big:
+                draw.text((xx - 8, ty + 6), f"z={z:.0f}",
+                          fill=DarkTheme.TEXT_SECONDARY,
+                          font=self._font)
+            z += 0.2
+        # Snapshot circles + playhead.
+        for i, sn in enumerate(tp.snaps):
+            xx = x_of(sn.redshift)
+            col = (DarkTheme.ACCENT if i == tp.index
+                   else DarkTheme.TEXT_SECONDARY)
+            draw.ellipse([xx - 4, ty - 4, xx + 4, ty + 4], fill=col)
+        xx = x_of(cur.redshift)
+        draw.line([(xx, 2), (xx, 28)], fill=DarkTheme.ACCENT, width=2)
+
+        # Left info; right fps.
+        draw.text((8, 6), f"z={cur.redshift:.2f} | t={cur.time_gyr:.2f} Gyr",
+                  fill=DarkTheme.TEXT_PRIMARY, font=self._font)
+        draw.text((tx0 + track_w + 14, 6), f"{tp.fps:.0f} fps",
+                  fill=DarkTheme.TEXT_SECONDARY, font=self._font)
+        self._buttons.append((tx0 + track_w + 10, 2,
+                              tx0 + track_w + 80, 26, "tl_fps"))
+
+        # Row 1 (bottom 20px): transport, centered.
+        labels = [("|<", "tl_first"), ("<", "tl_back"),
+                  ("||" if tp.playing else ">", "tl_play"),
+                  (">", "tl_fwd"), (">|", "tl_last")]
+        bx = tw // 2 - 70
+        for lbl, act in labels:
+            draw.rectangle([(bx, 30), (bx + 24, 48)],
+                           fill=DarkTheme.BG_RAISED)
+            bb = draw.textbbox((0, 0), lbl, font=self._font)
+            draw.text((bx + (24 - bb[2] + bb[0]) // 2, 31), lbl,
+                      fill=DarkTheme.TEXT_PRIMARY, font=self._font)
+            self._buttons.append((bx, 30, bx + 24, 48, act))
+            bx += 28
+
+        self._panel_w, self._panel_h = tw, th
+        self._panel_x, self._panel_y = self._panel_origin(tw, th)
+        self._upload_panel(tw, th, img.tobytes())
+
+    def on_click(self, x, y):
+        if not self.enabled or self.player is None:
+            return False
+        lx, ly = x - self._panel_x, y - self._panel_y
+        if not (0 <= lx <= self._panel_w and 0 <= ly <= self._panel_h):
+            return False
+        for x0, y0, x1, y1, act in self._buttons:
+            if x0 <= lx <= x1 and y0 <= ly <= y1:
+                return act
+        tx0, tweff = self._track
+        if 4 <= ly <= 28 and tx0 - 6 <= lx <= tx0 + tweff + 6:
+            return ("tl_jump",
+                    self.player.nearest_index(lx - tx0, tweff))
+        return True
+
+    def render(self):
+        if not self.enabled:
+            return
+        super().render()
+
+
+class MovieRecorderPanel(Panel):
+    """Movie recorder (Section 10.B): manual / orbit / series modes,
+    fps + resolution + format, ffmpeg auto-assembly on stop."""
+
+    MODES = ["Manual", "Orbit", "Series"]
+    FORMATS = (["MP4 (H.264)", "PNG sequence", "ProRes 422"]
+               if __import__("sys").platform == "darwin"
+               else ["MP4 (H.264)", "PNG sequence"])
+    RESOLUTIONS = ["720p", "1080p", "4K"]
+
+    def __init__(self):
+        super().__init__(DRAWER_STYLE)
+        self.enabled = False
+        self.style = PanelStyle(**{**DRAWER_STYLE.__dict__,
+                                   "position": "center-left"})
+        self.recording = False
+        self.mode_idx = 0
+        self.fps = 24
+        self.res_idx = 1
+        self.fmt_idx = 0
+        self.orbit_speed = 30.0
+        self.orbit_duration = 12.0
+        self.frames_per_snap = 1
+        self.series_available = False
+        self._buttons = []
+        self._last_key = None
+
+    def update(self, _data=None):
+        if not self.enabled:
+            return
+        s = self.style
+        M, LH = s.margin, s.line_height
+        key = (self.recording, self.mode_idx, self.fps, self.res_idx,
+               self.fmt_idx, self.orbit_speed, self.orbit_duration,
+               self._fb_width, self._fb_height)
+        if key == self._last_key and self._tex is not None:
+            return
+        self._last_key = key
+        self._buttons = []
+
+        rows = 8 + (2 if self.MODES[self.mode_idx] == "Orbit" else 0)
+        tw, th = 320, LH * rows + 3 * M + 30
+        img = Image.new("RGBA", (tw, th), DarkTheme.TRANSPARENT)
+        draw = ImageDraw.Draw(img)
+        _rounded(draw, [(0, 0), (tw - 1, th - 1)], s.radius,
+                 fill=DarkTheme.BG_SURFACE, outline=DarkTheme.BORDER)
+        draw.text((M, 6), "Movie recorder", fill=DarkTheme.ACCENT,
+                  font=self._font)
+        y = LH + 8
+        # Start/stop button.
+        fill = DarkTheme.DANGER if self.recording else DarkTheme.SUCCESS
+        lbl = "STOP RECORDING" if self.recording else "START RECORDING"
+        _rounded(draw, [(M, y), (tw - M, y + 34)], 8, fill=fill)
+        bb = draw.textbbox((0, 0), lbl, font=self._font)
+        draw.text(((tw - bb[2] + bb[0]) // 2, y + 6), lbl,
+                  fill=DarkTheme.TEXT_PRIMARY, font=self._font)
+        self._buttons.append((M, y, tw - M, y + 34, "mv_toggle"))
+        y += 40
+
+        def row(label, value, action):
+            nonlocal y
+            draw.text((M, y), label, fill=DarkTheme.TEXT_SECONDARY,
+                      font=self._font)
+            bb = draw.textbbox((0, 0), str(value), font=self._font)
+            _rounded(draw, [(tw - M - bb[2] + bb[0] - 16, y),
+                            (tw - M, y + LH - 4)], 6,
+                     fill=DarkTheme.BG_RAISED)
+            draw.text((tw - M - bb[2] + bb[0] - 8, y), str(value),
+                      fill=DarkTheme.TEXT_PRIMARY, font=self._font)
+            self._buttons.append((tw - M - bb[2] + bb[0] - 16, y,
+                                  tw - M, y + LH - 4, action))
+            y += LH
+
+        mode = self.MODES[self.mode_idx]
+        if mode == "Series" and not self.series_available:
+            mode += " (n/a)"
+        row("Mode", mode, "mv_mode")
+        row("FPS", self.fps, "mv_fps")
+        row("Resolution", self.RESOLUTIONS[self.res_idx], "mv_res")
+        row("Format", self.FORMATS[self.fmt_idx], "mv_fmt")
+        if self.MODES[self.mode_idx] == "Orbit":
+            row("Orbit deg/s", f"{self.orbit_speed:.0f}", "mv_ospeed")
+            row("Duration s", f"{self.orbit_duration:.0f}", "mv_odur")
+        if self.MODES[self.mode_idx] == "Series":
+            row("Frames/snap", self.frames_per_snap, "mv_fpsnap")
+
+        self._panel_w, self._panel_h = tw, th
+        self._panel_x, self._panel_y = self._panel_origin(tw, th)
+        self._upload_panel(tw, th, img.tobytes())
+
+    def on_click(self, x, y):
+        if not self.enabled:
+            return False
+        lx, ly = x - self._panel_x, y - self._panel_y
+        if not (0 <= lx <= self._panel_w and 0 <= ly <= self._panel_h):
+            return False
+        for x0, y0, x1, y1, act in self._buttons:
+            if x0 <= lx <= x1 and y0 <= ly <= y1:
+                if act == "mv_mode" and not self.recording:
+                    self.mode_idx = (self.mode_idx + 1) % len(self.MODES)
+                    if (self.MODES[self.mode_idx] == "Series"
+                            and not self.series_available):
+                        self.mode_idx = 0
+                    self._last_key = None
+                    return True
+                if act == "mv_fps" and not self.recording:
+                    cyc = [12, 24, 30, 60]
+                    self.fps = cyc[(cyc.index(self.fps) + 1) % len(cyc)] \
+                        if self.fps in cyc else 24
+                    self._last_key = None
+                    return True
+                if act == "mv_res" and not self.recording:
+                    self.res_idx = (self.res_idx + 1) % len(self.RESOLUTIONS)
+                    self._last_key = None
+                    return ("mv_res_changed", self.RESOLUTIONS[self.res_idx])
+                if act == "mv_fmt" and not self.recording:
+                    self.fmt_idx = (self.fmt_idx + 1) % len(self.FORMATS)
+                    self._last_key = None
+                    return True
+                if act == "mv_ospeed" and not self.recording:
+                    cyc = [15.0, 30.0, 60.0, 90.0]
+                    self.orbit_speed = cyc[
+                        (cyc.index(self.orbit_speed) + 1) % len(cyc)] \
+                        if self.orbit_speed in cyc else 30.0
+                    self._last_key = None
+                    return True
+                if act == "mv_odur" and not self.recording:
+                    cyc = [6.0, 12.0, 24.0, 48.0]
+                    self.orbit_duration = cyc[
+                        (cyc.index(self.orbit_duration) + 1) % len(cyc)] \
+                        if self.orbit_duration in cyc else 12.0
+                    self._last_key = None
+                    return True
+                if act == "mv_fpsnap" and not self.recording:
+                    self.frames_per_snap = (self.frames_per_snap % 4) + 1
+                    self._last_key = None
+                    return True
+                return act
+        return True
+
+    def render(self):
+        if not self.enabled:
+            return
+        super().render()
+
+
+def ffmpeg_command(fps, fmt_label, frames_pattern, out_path):
+    """The ffmpeg invocation for a recorded PNG sequence."""
+    if fmt_label.startswith("ProRes"):
+        return ["ffmpeg", "-y", "-r", str(fps), "-i", frames_pattern,
+                "-c:v", "prores_ks", "-profile:v", "2", out_path]
+    return ["ffmpeg", "-y", "-r", str(fps), "-i", frames_pattern,
+            "-c:v", "libx264", "-crf", "18", "-pix_fmt", "yuv420p",
+            out_path]
+
+
+class AboutPanel(Panel):
+    """Help > About: version table + credits."""
+
+    def __init__(self):
+        super().__init__(DRAWER_STYLE)
+        self.enabled = False
+        self.style = PanelStyle(**{**DRAWER_STYLE.__dict__,
+                                   "position": "center",
+                                   "font_family": "monospace"})
+        self._last_key = None
+
+    @staticmethod
+    def version_rows():
+        import platform
+
+        rows = [("Python", platform.python_version())]
+        for mod in ("wgpu", "meshoid", "numpy", "astropy", "numba",
+                    "trident"):
+            try:
+                m = __import__(mod)
+                rows.append((mod, getattr(m, "__version__", "?")))
+            except ImportError:
+                rows.append((mod, "not installed"))
+        return rows
+
+    def update(self, _data=None):
+        if not self.enabled:
+            return
+        s = self.style
+        M, LH = s.margin, s.line_height
+        rows = self.version_rows()
+        key = ("about", self._fb_width, self._fb_height)
+        if key == self._last_key and self._tex is not None:
+            return
+        self._last_key = key
+        tw = 340
+        th = (len(VIZMO_LOGO) + len(rows) + 7) * LH + 2 * M
+        img = Image.new("RGBA", (tw, th), DarkTheme.TRANSPARENT)
+        draw = ImageDraw.Draw(img)
+        _rounded(draw, [(0, 0), (tw - 1, th - 1)], s.radius,
+                 fill=DarkTheme.BG_SURFACE, outline=DarkTheme.BORDER)
+        y = M
+        for line in VIZMO_LOGO:
+            bb = draw.textbbox((0, 0), line, font=self._font)
+            draw.text(((tw - bb[2] + bb[0]) // 2, y), line,
+                      fill=DarkTheme.ACCENT, font=self._font)
+            y += LH
+        try:
+            from importlib.metadata import version as _ver
+
+            v = _ver("vizmo")
+        except Exception:
+            v = "dev"
+        for line in (f"v{v}", "Interactive 3D simulation explorer"):
+            bb = draw.textbbox((0, 0), line, font=self._font)
+            draw.text(((tw - bb[2] + bb[0]) // 2, y), line,
+                      fill=DarkTheme.TEXT_PRIMARY, font=self._font)
+            y += LH
+        draw.line([(M, y + 2), (tw - M, y + 2)], fill=DarkTheme.BORDER)
+        y += 8
+        for name, ver in rows:
+            draw.text((M, y), name, fill=DarkTheme.TEXT_SECONDARY,
+                      font=self._font)
+            bb = draw.textbbox((0, 0), ver, font=self._font)
+            draw.text((tw - M - bb[2] + bb[0], y), ver,
+                      fill=DarkTheme.TEXT_PRIMARY, font=self._font)
+            y += LH
+        draw.line([(M, y + 2), (tw - M, y + 2)], fill=DarkTheme.BORDER)
+        y += 8
+        for line in ("Built by Tanmay Singh (ASU STARs Lab)",
+                     "and Mike Grudic. Core GPU renderer", 
+                     "by mikegrudic."):
+            draw.text((M, y), line, fill=DarkTheme.TEXT_SECONDARY,
+                      font=self._font)
+            y += LH
+        self._close_zone = (tw - M - 60, y, tw - M, y + LH)
+        _rounded(draw, [self._close_zone[:2], self._close_zone[2:]], 6,
+                 fill=DarkTheme.BG_RAISED)
+        draw.text((tw - M - 50, y), "Close",
+                  fill=DarkTheme.TEXT_PRIMARY, font=self._font)
+        self._panel_w, self._panel_h = tw, th
+        self._panel_x, self._panel_y = self._panel_origin(tw, th)
+        self._upload_panel(tw, th, img.tobytes())
+
+    def on_click(self, x, y):
+        if not self.enabled:
+            return False
+        lx, ly = x - self._panel_x, y - self._panel_y
+        if not (0 <= lx <= self._panel_w and 0 <= ly <= self._panel_h):
+            self.enabled = False
+            return True
+        self.enabled = False  # any click closes
+        return True
+
+    def render(self):
+        if not self.enabled:
+            return
+        super().render()
+
+
+class KeyboardShortcutsPanel(Panel):
+    """Help > Keyboard Shortcuts: categorized, scrollable, searchable
+    listing of keymap.py."""
+
+    def __init__(self):
+        super().__init__(DRAWER_STYLE)
+        self.enabled = False
+        self.style = PanelStyle(**{**DRAWER_STYLE.__dict__,
+                                   "position": "center"})
+        self.search = ""
+        self.scroll = 0
+        self._last_key = None
+
+    def filtered(self):
+        from .keymap import KEYBINDINGS, KEY_CATEGORIES
+
+        q = self.search.lower()
+        out = []
+        for cat in KEY_CATEGORIES:
+            hits = [(k, d) for k, d, c in KEYBINDINGS
+                    if c == cat and (q in k.lower() or q in d.lower())]
+            if hits:
+                out.append((cat, hits))
+        return out
+
+    def on_char(self, char):
+        if not self.enabled:
+            return False
+        self.search += char
+        self.scroll = 0
+        self._last_key = None
+        return True
+
+    def on_backspace(self):
+        if self.enabled and self.search:
+            self.search = self.search[:-1]
+            self._last_key = None
+            return True
+        return False
+
+    def on_scroll(self, dy):
+        if not self.enabled:
+            return False
+        self.scroll = max(0, self.scroll - int(dy) * 3)
+        self._last_key = None
+        return True
+
+    def update(self, _data=None):
+        if not self.enabled:
+            return
+        s = self.style
+        M, LH = s.margin, s.line_height
+        groups = self.filtered()
+        key = (self.search, self.scroll,
+               tuple((c, len(h)) for c, h in groups),
+               self._fb_width, self._fb_height)
+        if key == self._last_key and self._tex is not None:
+            return
+        self._last_key = key
+        tw, th = 380, 600
+        img = Image.new("RGBA", (tw, th), DarkTheme.TRANSPARENT)
+        draw = ImageDraw.Draw(img)
+        _rounded(draw, [(0, 0), (tw - 1, th - 1)], s.radius,
+                 fill=DarkTheme.BG_SURFACE, outline=DarkTheme.BORDER)
+        hint = self.search or "type to filter..."
+        draw.text((M, 6), f"Shortcuts: {hint}",
+                  fill=DarkTheme.ACCENT, font=self._font)
+        # Flatten rows then window by scroll.
+        flat = []
+        for cat, hits in groups:
+            flat.append(("__cat__", cat))
+            flat.extend(hits)
+        n_vis = (th - LH - 2 * M) // LH
+        total = len(flat)
+        window = flat[self.scroll:self.scroll + n_vis]
+        y = LH + 6
+        for item in window:
+            if item[0] == "__cat__":
+                draw.line([(M, y + LH // 2), (tw - M, y + LH // 2)],
+                          fill=DarkTheme.BORDER)
+                draw.text((M, y), item[1],
+                          fill=DarkTheme.TEXT_SECONDARY, font=self._font)
+            else:
+                k, d = item
+                draw.text((M, y), k, fill=DarkTheme.ACCENT,
+                          font=self._font)
+                if len(d) > 34:
+                    d = d[:33] + "…"
+                bb = draw.textbbox((0, 0), d, font=self._font)
+                draw.text((tw - M - bb[2] + bb[0], y), d,
+                          fill=DarkTheme.TEXT_PRIMARY, font=self._font)
+            y += LH
+        # Scrollbar.
+        if total > n_vis:
+            frac = n_vis / total
+            top = self.scroll / total
+            sb_y0 = int(LH + top * (th - 2 * LH))
+            sb_h = max(int(frac * (th - 2 * LH)), 20)
+            _rounded(draw, [(tw - 8, sb_y0), (tw - 4, sb_y0 + sb_h)],
+                     2, fill=DarkTheme.TEXT_DISABLED)
+        self._panel_w, self._panel_h = tw, th
+        self._panel_x, self._panel_y = self._panel_origin(tw, th)
+        self._upload_panel(tw, th, img.tobytes())
+
+    def on_click(self, x, y):
+        if not self.enabled:
+            return False
+        lx, ly = x - self._panel_x, y - self._panel_y
+        if not (0 <= lx <= self._panel_w and 0 <= ly <= self._panel_h):
+            self.enabled = False
+            return True
+        return True
+
+    def render(self):
+        if not self.enabled:
+            return
+        super().render()

@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.10.0 - 2026-06-10
+
+### Added
+- Timeline scrubber (4.C): bottom-edge ruler with dz=0.2/1.0 ticks,
+  per-snapshot circles, accent playhead, click-to-jump, transport
+  buttons (first/back/play-pause/fwd/last), fps cycling, z/t readout;
+  Space play/pause + Home/End jumps; monotonic-clock playback driving
+  the in-place snapshot loader.
+- Movie recorder (10.B, Ctrl+V / File > Export > Movie...): Manual /
+  Orbit (deg/s + duration, auto-stop) / Series (player-driven) modes,
+  fps/resolution/format (ProRes on macOS only, 4K memory warning),
+  background ffmpeg assembly with copyable-command fallback and a
+  frames/duration success toast.
+- About panel (real version table incl. not-installed markers,
+  credits) and a categorized, searchable, scrollable Keyboard
+  Shortcuts browser; keymap entries now carry categories.
+- Undo system: 20-deep undo/redo of aperture, filter, and render-mode
+  changes (Ctrl+Z / Ctrl+Shift+Z, new Edit menu), deep-copied
+  snapshots with exact round-tripping.
+
 ## 0.9.0 — 2026-06-10
 
 ### Deep-infrastructure completion — nothing deferred remains

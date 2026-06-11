@@ -69,6 +69,7 @@ def run_wgpu_app(
         from .series import discover_snapshots
 
         _series["snaps"] = discover_snapshots(snapshot_path)
+        _series["player_pending"] = True
         if not _series["snaps"]:
             raise FileNotFoundError(
                 f"--series: no snapshots found under {snapshot_path}")
@@ -334,12 +335,61 @@ def run_wgpu_app(
     # (toasts exists below; fire the load toast after panel creation)
     menubar = WGPUMenuBar(device, present_format,
                           build_default_menus(_recents.get()))
+    from .overlay import MenuItem as _MI
+
+    _menus = {"File": menubar.menus["File"]}
+    _menus["Edit"] = [_MI("Undo", "Ctrl+Z", "undo"),
+                      _MI("Redo", "Ctrl+Shift+Z", "redo")]
+    for k in ("View", "Analysis", "Export", "Help"):
+        _menus[k] = menubar.menus[k]
+    menubar.menus = _menus
     from .wgpu_overlay import WGPURightDock
 
     from .wgpu_overlay import WGPUWelcomeOverlay
 
     welcome = WGPUWelcomeOverlay(device, present_format)
     welcome.enabled = bool(show_welcome)
+    from .undo import UndoStack
+    from .wgpu_overlay import (WGPUTimelineScrubber, WGPUMovieRecorder,
+                               WGPUAboutPanel, WGPUShortcutsPanel)
+
+    timeline = WGPUTimelineScrubber(device, present_format)
+    movie_panel = WGPUMovieRecorder(device, present_format)
+    about_panel = WGPUAboutPanel(device, present_format)
+    shortcuts_panel = WGPUShortcutsPanel(device, present_format)
+    undo = UndoStack()
+
+    def _undo_state():
+        return (dict(_aperture), list(data.filters),
+                _state["_render_mode_name"])
+
+    def _undo_push(action):
+        undo.push(action, *_undo_state())
+
+    def _undo_restore(entry):
+        ap = entry["prev_aperture"]
+        for k in ("active", "placing", "center", "radius",
+                  "center_mode", "shape_idx"):
+            if k in ap:
+                _aperture[k] = ap[k]
+        aperture_panel.enabled = bool(_aperture.get("center") is not None
+                                      and (_aperture["active"]
+                                           or _aperture["placing"]))
+        if _aperture["active"] and _aperture["center"] is not None:
+            try:
+                _submit_aperture()
+            except Exception:
+                pass
+        else:
+            drawer.clear_scope()
+        data.set_filters(entry["prev_filters"])
+        _state["_render_mode_name"] = entry["prev_render_mode"]
+        try:
+            app_proxy._apply_render_mode(auto_range=False)
+        except Exception:
+            pass
+        drawer.refresh()
+
     right_dock = WGPURightDock(device, present_format)
     cmap_browser = WGPUColormapBrowser(device, present_format)
     field_picker = WGPUFieldPicker(device, present_format)
@@ -362,6 +412,13 @@ def run_wgpu_app(
     # analysis-aperture center).
     _pending_pick = {"ray": None, "frames": 0, "purpose": "inspect"}
     toasts.show(_load_done_toast, "ok")
+    if _series.get("player_pending"):
+        from .series import TimelinePlayer
+
+        _series["player"] = TimelinePlayer(_series["snaps"])
+        timeline.player = _series["player"]
+        timeline.enabled = True
+        movie_panel.series_available = True
 
     # Analysis aperture: a world-space sphere the user places with the
     # mouse (M key). While `placing`, clicks move the center and scroll
@@ -785,6 +842,7 @@ def run_wgpu_app(
         """Refine the center inside the sphere and hand it to the drawer."""
         from .analysis import CENTER_MODES, find_center_in_region
 
+        _undo_push("aperture change")
         mode_name = CENTER_MODES[_aperture["center_mode"] % len(CENTER_MODES)]
         try:
             refined = find_center_in_region(
@@ -1109,6 +1167,7 @@ def run_wgpu_app(
             elif key == glfw.KEY_M:
                 if mods & glfw.MOD_SHIFT:
                     # Shift+M: drop the aperture, back to global scope.
+                    _undo_push("clear aperture")
                     _aperture["active"] = False
                     _aperture["placing"] = False
                     aperture_panel.enabled = False
@@ -1145,8 +1204,37 @@ def run_wgpu_app(
                 new_i = _series["index"] + step
                 if 0 <= new_i < len(_series["snaps"]):
                     _series["pending"] = new_i
+                    if _series.get("player"):
+                        _series["player"].index = new_i
                 else:
                     toasts.show("End of series", "warn")
+            elif key == glfw.KEY_SPACE and _series.get("player"):
+                playing = _series["player"].toggle_play()
+                toasts.show("Playing" if playing else "Paused")
+            elif key == glfw.KEY_HOME and _series.get("player"):
+                _series["player"].home()
+                _series["pending"] = _series["player"].index
+            elif key == glfw.KEY_END and _series.get("player"):
+                _series["player"].end()
+                _series["pending"] = _series["player"].index
+            elif (key == glfw.KEY_Z and (mods & glfw.MOD_CONTROL)
+                    and (mods & glfw.MOD_SHIFT)):
+                entry = undo.redo(*_undo_state())
+                if entry is None:
+                    toasts.show("Nothing to redo", "warn")
+                else:
+                    _undo_restore(entry)
+                    toasts.show(f"Redid: {entry['action']}", "ok")
+            elif (key == glfw.KEY_Z and (mods & glfw.MOD_CONTROL)
+                    and not _slice["active"]):
+                entry = undo.undo(*_undo_state())
+                if entry is None:
+                    toasts.show("Nothing to undo", "warn")
+                else:
+                    _undo_restore(entry)
+                    toasts.show(f"Undid: {entry['action']}", "ok")
+            elif key == glfw.KEY_V and (mods & glfw.MOD_CONTROL):
+                movie_panel.enabled = not movie_panel.enabled
             elif key == glfw.KEY_I and (mods & glfw.MOD_SHIFT):
                 drawer.toggle("isosurface")
                 if drawer.mode == "isosurface" and not _iso["surfaces"]:
@@ -1491,6 +1579,49 @@ def run_wgpu_app(
             if mb_action:
                 if mb_action is not True:
                     _dispatch_menu_action(mb_action)
+                return
+            for pnl in (about_panel, shortcuts_panel):
+                if pnl.enabled and pnl.on_click(x, y):
+                    return
+            tl_action = (timeline.on_click(x, y)
+                         if timeline.enabled else False)
+            if tl_action:
+                tp = _series.get("player")
+                if tp and tl_action is not True:
+                    if tl_action == "tl_play":
+                        tp.toggle_play()
+                    elif tl_action == "tl_back":
+                        tp.step(-1)
+                        _series["pending"] = tp.index
+                    elif tl_action == "tl_fwd":
+                        tp.step(+1)
+                        _series["pending"] = tp.index
+                    elif tl_action == "tl_first":
+                        tp.home()
+                        _series["pending"] = tp.index
+                    elif tl_action == "tl_last":
+                        tp.end()
+                        _series["pending"] = tp.index
+                    elif tl_action == "tl_fps":
+                        cyc = [6.0, 12.0, 24.0, 30.0]
+                        tp.fps = (cyc[(cyc.index(tp.fps) + 1) % len(cyc)]
+                                  if tp.fps in cyc else 24.0)
+                    elif (isinstance(tl_action, tuple)
+                            and tl_action[0] == "tl_jump"):
+                        tp.index = tl_action[1]
+                        _series["pending"] = tp.index
+                    timeline._last_key = None
+                return
+            mv_action = (movie_panel.on_click(x, y)
+                         if movie_panel.enabled else False)
+            if mv_action:
+                if mv_action == "mv_toggle":
+                    _movie_toggle()
+                elif (isinstance(mv_action, tuple)
+                        and mv_action[0] == "mv_res_changed"
+                        and mv_action[1] == "4K"):
+                    toasts.show("4K recording requires significant "
+                                "GPU memory.", "warn", duration=6.0)
                 return
             dk_action = right_dock.on_click(x, y)
             if dk_action:
@@ -2051,6 +2182,9 @@ def run_wgpu_app(
     def scroll_callback(win, xoffset, yoffset):
         nonlocal dirty, ui_dirty, idle_streak
         idle_streak = 0
+        if shortcuts_panel.enabled and shortcuts_panel.on_scroll(yoffset):
+            ui_dirty = True
+            return
         if user_menu.on_scroll(yoffset):
             ui_dirty = True
             return
@@ -2077,6 +2211,9 @@ def run_wgpu_app(
         # Text-field editing only mutates UI state — no scene re-render.
         ui_dirty = True
         idle_streak = 0
+        if shortcuts_panel.enabled and shortcuts_panel.on_char(
+                chr(codepoint)):
+            return
         if field_picker.enabled and field_picker.on_char(chr(codepoint)):
             return
         user_menu.on_char(codepoint, app_proxy)
@@ -2657,6 +2794,7 @@ def run_wgpu_app(
         if isinstance(action, tuple):
             kind = action[0]
             if kind == "mode":
+                _undo_push(f"mode -> {action[1]}")
                 _state["_render_mode_name"] = action[1]
                 app_proxy._apply_render_mode()
             elif kind == "drawer":
@@ -2739,14 +2877,91 @@ def run_wgpu_app(
             toasts.show("Sightline mode: click two points")
         elif action == "help":
             help_panel.enabled = not help_panel.enabled
+        elif action == "undo":
+            entry = undo.undo(*_undo_state())
+            if entry is not None:
+                _undo_restore(entry)
+                toasts.show(f"Undid: {entry['action']}", "ok")
+        elif action == "redo":
+            entry = undo.redo(*_undo_state())
+            if entry is not None:
+                _undo_restore(entry)
+                toasts.show(f"Redid: {entry['action']}", "ok")
+        elif action == "movie":
+            movie_panel.enabled = not movie_panel.enabled
+        elif action == "shortcuts":
+            shortcuts_panel.enabled = not shortcuts_panel.enabled
+            shortcuts_panel.search = ""
         elif action == "about":
-            import platform
+            about_panel.enabled = not about_panel.enabled
 
-            import wgpu as _wgpu
+    def _movie_toggle():
+        # Start/stop per movie-panel settings; on stop, assemble with
+        # ffmpeg in a background thread (or print the command).
+        import datetime as _dt
+        import shutil as _sh
+        import threading as _th
 
-            toasts.show(
-                f"vizmo 0.7.1 | py {platform.python_version()} | "
-                f"wgpu {_wgpu.__version__}", "info", duration=6.0)
+        if not movie_panel.recording:
+            base = screenshot_dir or "."
+            _recording["dir"] = os.path.join(
+                base, f"vizmo_rec_{int(time.time())}")
+            os.makedirs(_recording["dir"], exist_ok=True)
+            _recording["frame"] = 0
+            movie_panel.recording = True
+            movie_panel._last_key = None
+            mode = movie_panel.MODES[movie_panel.mode_idx]
+            if mode == "Orbit":
+                camera.start_orbit(
+                    _focus_center(),
+                    angular_speed=np.radians(movie_panel.orbit_speed))
+                movie_panel._orbit_stop_at = (
+                    time.monotonic() + movie_panel.orbit_duration)
+            elif mode == "Series" and _series.get("player"):
+                _series["player"].fps = movie_panel.fps
+                _series["player"].index = 0
+                _series["pending"] = 0
+                _series["player"].toggle_play()
+            toasts.show(f"Recording ({mode})...", "ok")
+            return
+        movie_panel.recording = False
+        movie_panel._last_key = None
+        camera.stop_orbit()
+        d, n = _recording["dir"], _recording["frame"]
+        _recording["dir"] = None
+        fmt = movie_panel.FORMATS[movie_panel.fmt_idx]
+        fps = movie_panel.fps
+        if fmt == "PNG sequence" or n == 0:
+            toasts.show(f"Recording stopped: {n} frames in {d}/", "ok")
+            return
+        from .science_panels import ffmpeg_command
+
+        stamp = _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+        ext = ".mov" if fmt.startswith("ProRes") else ".mp4"
+        out = os.path.join(screenshot_dir or ".",
+                           f"vizmo_{stamp}{ext}")
+        cmd = ffmpeg_command(fps, fmt,
+                             os.path.join(d, "frame_%05d.png"), out)
+        if _sh.which("ffmpeg") is None:
+            toasts.show("ffmpeg not found - run: " + " ".join(cmd),
+                        "warn", duration=12.0)
+            return
+
+        def _encode():
+            import subprocess as _sp
+
+            toasts.show("Encoding...", "info", duration=4.0)
+            r = _sp.run(cmd, capture_output=True)
+            if r.returncode == 0:
+                toasts.show(
+                    f"Movie saved: {os.path.basename(out)} "
+                    f"({n} frames, {n / fps:.1f}s at {fps}fps)", "ok",
+                    duration=8.0)
+            else:
+                toasts.show("ffmpeg failed - see terminal", "error")
+                print(r.stderr.decode()[-500:])
+
+        _th.Thread(target=_encode, daemon=True).start()
 
     def _handle_filter_action(action):
         """Mutate data.filters from a drawer action and re-render.
@@ -2756,6 +2971,7 @@ def run_wgpu_app(
         wildly log-distributed fields.
         """
         kind = action[0]
+        _undo_push(f"filter {action[0][2:]}")
         filters = list(data.filters)
         if kind == "f_add":
             field = action[1]
@@ -2916,6 +3132,18 @@ def run_wgpu_app(
                     toasts.show(f"Picked particle {idx:,}", "ok")
                 dirty = True
 
+        # Timeline playback (monotonic tick) + orbit-record auto-stop.
+        tp_ = _series.get("player")
+        if tp_ is not None and tp_.playing:
+            if tp_.tick(time.monotonic()):
+                _series["pending"] = tp_.index
+            dirty = True
+        if (movie_panel.recording
+                and getattr(movie_panel, "_orbit_stop_at", None)
+                and time.monotonic() > movie_panel._orbit_stop_at):
+            movie_panel._orbit_stop_at = None
+            _movie_toggle()
+
         # Snapshot-series navigation queues a path like any other
         # in-place load.
         if _series["pending"] is not None:
@@ -2926,6 +3154,9 @@ def run_wgpu_app(
             _pending_load["label"] = (
                 f"snapshot {info.snap_num} (z={info.redshift:.2f})")
             _series["index"] = new_i
+            if _series.get("player"):
+                _series["player"].index = new_i
+                timeline._last_key = None
 
         # In-place snapshot swap (series arrows, File > Open, recents).
         if _pending_load["path"] is not None:
@@ -3450,6 +3681,13 @@ def run_wgpu_app(
                           menubar, cmap_browser, field_picker):
                     p.set_framebuffer_size(fb_w, fb_h)
                 menubar.update()
+                if timeline.enabled:
+                    timeline.set_framebuffer_size(fb_w, fb_h)
+                    timeline.update()
+                for pnl in (movie_panel, about_panel, shortcuts_panel):
+                    if pnl.enabled:
+                        pnl.set_framebuffer_size(fb_w, fb_h)
+                        pnl.update()
                 if welcome.enabled:
                     welcome.set_framebuffer_size(fb_w, fb_h)
                     welcome.update()
@@ -3703,6 +3941,11 @@ def run_wgpu_app(
                     cmap_browser.render_to_pass(rpass)
                 if field_picker.enabled:
                     field_picker.render_to_pass(rpass)
+                if timeline.enabled:
+                    timeline.render_to_pass(rpass)
+                for pnl in (movie_panel, about_panel, shortcuts_panel):
+                    if pnl.enabled:
+                        pnl.render_to_pass(rpass)
                 if welcome.enabled:
                     welcome.render_to_pass(rpass)
                 toasts.render_to_pass(rpass)
